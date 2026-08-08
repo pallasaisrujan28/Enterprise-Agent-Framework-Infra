@@ -36,3 +36,8 @@ crash.*.log
 .env
 .env.*
 !.env.example
+
+# Scratch space for local-only helpers and rendered policy JSON used during
+# validation. Nothing in here is part of the pipeline, and some of it reads
+# credentials from a file outside the repo.
+.local/
