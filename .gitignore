@@ -21,9 +21,19 @@ tf.plan
 # Variable files can carry account-specific values. backend.hcl IS committed —
 # it holds a bucket name and an account id, neither of which is secret, and the
 # pairing between an account and its state location should be reviewable.
+#
+# `.tfvars.json` is listed separately on purpose: `*.tfvars` does NOT match
+# `accounts.tfvars.json`, so without this line the account emails generated in CI
+# would be committable.
 *.tfvars
 *.auto.tfvars
+*.tfvars.json
 !*.tfvars.example
+
+# Rendered policies and Access Analyzer output. Regenerable from a plan.
+policy-out/
+plan.json
+plan.txt
 
 # Terraform crash logs can contain request/response bodies.
 crash.log

@@ -1,0 +1,171 @@
+# PLAN. Read-only, runs on every branch, never changes anything.
+#
+# Uses the PLAN role, which holds ReadOnlyAccess plus permission to write `*.tflock`
+# objects only. A plan needs to take the state lock, which ReadOnlyAccess does not
+# cover — and that failure arrives late, presenting as a state problem rather than a
+# permissions one.
+#
+# WHY THIS TRIGGERS ON `push` AND NOT `pull_request`:
+#
+# The pull-request token's claim is `repo:<owner>/<repo>:pull_request`, which says
+# nothing about WHICH branch. The push token's claim is
+# `repo:<owner>/<repo>:ref:refs/heads/<branch>`, so the branch is visible in
+# CloudTrail and available to any future narrowing. Results still appear on the pull
+# request, because GitHub attaches check runs to the commit.
+
+name: plan
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "bootstrap/**"
+      - "scripts/**"
+      - ".github/workflows/plan.yml"
+  workflow_dispatch:
+
+permissions:
+  # Required to get an OIDC token at all. Without it the credentials step fails with
+  # a message that does not mention permissions.
+  id-token: write
+  contents: read
+
+concurrency:
+  group: plan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: 1.13.3
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  seed:
+    name: plan seed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-plan-seed-${{ github.run_id }}
+
+      - name: verify the account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2
+            exit 1
+          fi
+          echo "account $actual"
+
+      - name: plan
+        working-directory: bootstrap/seed
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
+            | tee plan.txt
+
+          # Fail if the summary line is absent rather than assume no changes.
+          # Terraform colorizes even into a pipe, so -no-color above is what makes
+          # this grep able to match at all. A check that silently matches nothing is
+          # worse than no check.
+          if ! grep -qE '^(Plan: |No changes)' plan.txt; then
+            echo "no plan summary found - do not trust this run" >&2
+            exit 1
+          fi
+
+      - name: summary
+        if: always()
+        working-directory: bootstrap/seed
+        run: |
+          {
+            echo "### seed"
+            echo '```'
+            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  organization:
+    name: plan organization
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-plan-org-${{ github.run_id }}
+
+      - name: build the accounts variable
+        env:
+          EAF_DEV_ACCOUNT_EMAIL: ${{ vars.EAF_DEV_ACCOUNT_EMAIL }}
+          EAF_PROD_ACCOUNT_EMAIL: ${{ vars.EAF_PROD_ACCOUNT_EMAIL }}
+        run: bash scripts/write-accounts-tfvars.sh bootstrap/organization/accounts.tfvars.json
+
+      - name: plan
+        working-directory: bootstrap/organization
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -out=tfplan \
+            -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
+            -var="state_bucket=${{ vars.AWS_STATE_BUCKET }}" \
+            -var-file=accounts.tfvars.json \
+            | tee plan.txt
+
+          if ! grep -qE '^(Plan: |No changes)' plan.txt; then
+            echo "no plan summary found - do not trust this run" >&2
+            exit 1
+          fi
+
+          terraform show -json tfplan > plan.json
+
+      # Runs here rather than in the credential-free `checks` workflow because it
+      # needs both real AWS (Access Analyzer) and a resolved plan. Static checks
+      # cannot catch a nonexistent IAM action, and an unknown action inside a Deny
+      # denies nothing while reading as a guardrail.
+      - name: validate the SCP
+        run: bash scripts/check-policies.sh bootstrap/organization/plan.json policy-out
+
+      - name: summary
+        if: always()
+        working-directory: bootstrap/organization
+        run: |
+          {
+            echo "### organization"
+            echo '```'
+            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
+            echo '```'
+            echo "Account creation is effectively permanent: closure takes 90 days"
+            echo "and closed accounts still count against the org quota. Read the"
+            echo "full plan in the job log before approving an apply."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The plan is what the apply job consumes, so the reviewer approves something
+      # that has already been produced and printed rather than a plan generated after
+      # approval.
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: organization-plan-${{ github.sha }}
+          path: |
+            bootstrap/organization/tfplan
+            bootstrap/organization/plan.txt
+          retention-days: 5

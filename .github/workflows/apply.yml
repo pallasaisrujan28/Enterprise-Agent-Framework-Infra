@@ -1,0 +1,247 @@
+# APPLY. Manual only, and gated on a human approval.
+#
+# TWO JOBS, AND THE ORDER IS THE POINT.
+#
+#   1. plan    - read-only role, no gate. Produces and PRINTS the plan.
+#   2. apply   - admin role, behind the approval gate. Applies THAT SAVED PLAN.
+#
+# The reviewer therefore approves a plan they can read. A single job would ask for
+# approval first and generate the plan afterwards, so the approval would be for
+# something nobody had seen.
+#
+# WHY THE APPROVAL IS THE CONTROL RATHER THAN THE BRANCH:
+#
+# The apply role's trust policy accepts exactly one `sub` claim:
+#
+#   repo:<owner>/<repo>:environment:bootstrap-apply
+#
+# GitHub only writes an environment claim when the job really ran in that
+# Environment. Where the Environment requires reviewers, the claim is evidence a
+# human approved THIS run. Branch protection cannot prove that; it proves code
+# reached main.
+#
+# ONE-TIME SETUP, which Terraform is not doing here (see github_apply_environment in
+# bootstrap/seed/variables.tf):
+#
+#   Settings > Environments > New environment > bootstrap-apply
+#     Required reviewers:    at least one person
+#     Deployment branches:   Selected branches -> main
+#
+# Until reviewers are configured the Environment exists but approves nothing. AWS can
+# only check the Environment's NAME, not that anyone clicked approve.
+
+name: apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      layer:
+        description: "Which bootstrap layer to apply"
+        required: true
+        type: choice
+        options:
+          - organization
+          - seed
+      confirm:
+        description: 'Type "apply" to confirm'
+        required: true
+        type: string
+      dev_account_email:
+        description: "EAF-DEV root email. Leave blank to use the repository variable. CANNOT BE CHANGED after the account exists."
+        required: false
+        type: string
+      prod_account_email:
+        description: "EAF-PROD root email. Leave blank to use the repository variable. CANNOT BE CHANGED after the account exists."
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  # NOT cancel-in-progress. Cancelling a running apply can leave state locked and
+  # resources half-created, and for account creation that is unrecoverable.
+  group: apply-${{ inputs.layer }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: 1.13.3
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  plan:
+    name: plan ${{ inputs.layer }}
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - name: check the confirmation
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.confirm }}" != "apply" ]]; then
+            echo "confirmation was not the word apply - stopping" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-preapply-plan-${{ github.run_id }}
+
+      - name: build the accounts variable
+        if: inputs.layer == 'organization'
+        env:
+          # A blank workflow input falls back to the stored repository variable, so a
+          # routine re-run never has to retype an address. Emails MUST be stable:
+          # AWS Organizations has no API to change one after creation.
+          EAF_DEV_ACCOUNT_EMAIL: ${{ inputs.dev_account_email || vars.EAF_DEV_ACCOUNT_EMAIL }}
+          EAF_PROD_ACCOUNT_EMAIL: ${{ inputs.prod_account_email || vars.EAF_PROD_ACCOUNT_EMAIL }}
+        run: bash scripts/write-accounts-tfvars.sh bootstrap/organization/accounts.tfvars.json
+
+      - name: plan
+        id: plan
+        working-directory: bootstrap/${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+
+          args=(-no-color -input=false -lock-timeout=5m -out=tfplan
+                -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}")
+          if [[ "${{ inputs.layer }}" == "organization" ]]; then
+            args+=(-var="state_bucket=${{ vars.AWS_STATE_BUCKET }}"
+                   -var-file=accounts.tfvars.json)
+          fi
+
+          # -detailed-exitcode: 0 no changes, 1 error, 2 changes present. Used so the
+          # apply job can be skipped when there is nothing to do, instead of asking a
+          # human to approve a no-op.
+          set +e
+          terraform plan "${args[@]}" -detailed-exitcode | tee plan.txt
+          code=${PIPESTATUS[0]}
+          set -e
+
+          case "$code" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "plan failed with exit code $code" >&2; exit "$code" ;;
+          esac
+
+      - name: validate the SCP
+        if: inputs.layer == 'organization'
+        working-directory: bootstrap/organization
+        run: |
+          set -euo pipefail
+          terraform show -json tfplan > plan.json
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/check-policies.sh bootstrap/organization/plan.json policy-out
+
+      - name: summary
+        if: always()
+        working-directory: bootstrap/${{ inputs.layer }}
+        run: |
+          {
+            echo "## ${{ inputs.layer }} - awaiting approval"
+            echo '```'
+            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
+            echo '```'
+            if [[ "${{ inputs.layer }}" == "organization" ]]; then
+              echo "**Read the full plan below before approving.** Creating an AWS"
+              echo "account is effectively permanent: closure takes 90 days and a"
+              echo "closed account still counts against the organization quota."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.layer }}-${{ github.run_id }}
+          path: |
+            bootstrap/${{ inputs.layer }}/tfplan
+            bootstrap/${{ inputs.layer }}/plan.txt
+          retention-days: 5
+
+  apply:
+    name: apply ${{ inputs.layer }}
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+
+    # THE GATE. This single line is what rewrites the `sub` claim to the environment
+    # form, which is the only claim the admin role accepts. Remove it and the apply
+    # role becomes unassumable — the failure is AccessDenied, not a missing approval.
+    environment: ${{ vars.AWS_APPLY_ENVIRONMENT || 'bootstrap-apply' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.layer }}-${{ github.run_id }}
+          path: bootstrap/${{ inputs.layer }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-apply-${{ github.run_id }}
+
+      - name: verify the account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2
+            exit 1
+          fi
+          echo "account $actual"
+
+      - name: apply the saved plan
+        working-directory: bootstrap/${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+
+          # Applying the SAVED plan, not re-planning. Terraform refuses if state moved
+          # since the plan was made ("Saved plan is stale"), which is the behaviour we
+          # want: it means the plan the reviewer read is no longer what would happen.
+          #
+          # Seen once in this project: that error appeared AFTER the apply had already
+          # landed and written state. Cause never determined. So on a stale-plan
+          # error, verify the real end state with `terraform plan` before re-running
+          # anything.
+          #
+          # No -auto-approve. A saved plan file is already the approval.
+          terraform apply -no-color -input=false -lock-timeout=5m tfplan
+
+      - name: outputs
+        working-directory: bootstrap/${{ inputs.layer }}
+        run: |
+          {
+            echo "## ${{ inputs.layer }} applied"
+            echo '```'
+            terraform output -no-color
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  no_changes:
+    name: nothing to apply
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "### ${{ inputs.layer }}: no changes" >> "$GITHUB_STEP_SUMMARY"
+          echo "Plan reported no differences, so no approval was requested." >> "$GITHUB_STEP_SUMMARY"
