@@ -59,17 +59,48 @@ variable "github_repository" {
   }
 }
 
-variable "github_branch" {
-  description = <<-EOT
-    The only branch whose workflow runs may assume the bootstrap pipeline role.
+# NOTE: there is no `github_branch` variable.
+#
+# An earlier version pinned the single admin role to `refs/heads/main`. Removed
+# because a branch name is the wrong control for an apply. Reaching main proves the
+# change was reviewed and merged; it does not prove anyone approved THIS run. The
+# apply gate is now the GitHub Environment below, and the plan role trusts any
+# branch because it is read-only.
 
-    The role holds AdministratorAccess in the management account, so the trust
-    condition is the control that matters. Scoped to one branch because a pull
-    request from any branch — including one nobody has reviewed — must not be able
-    to reach it.
+variable "github_apply_environment" {
+  description = <<-EOT
+    The GitHub Environment whose approval is required before an apply can reach
+    AWS.
+
+    This exact name goes inside the apply role's trust policy, so a job can only
+    assume that role if it declares `environment:` with the same value. Rename it
+    here and the workflow must be renamed in the same commit, or apply stops
+    working.
+
+    CREATED BY HAND IN GITHUB:
+
+      Settings > Environments > New environment > this name
+        - Required reviewers: at least one person
+        - Deployment branches: selected branches, `main` only
+
+    By hand is a CHOICE, not a limitation. An earlier version of this comment said
+    Terraform cannot create it, which is wrong. The AWS provider cannot, but the
+    GitHub provider's `github_repository_environment` can, including reviewers and
+    branch policy. Not used because it needs a GitHub token with repository admin
+    rights, which is a new long-lived secret to store and rotate — trading one
+    problem for another to automate a five-minute task done once.
+
+    Until reviewers are configured the Environment exists but approves nothing. AWS
+    can only check that the run happened in an Environment of this name; it cannot
+    check that anyone had to click approve. That half is yours to enforce.
   EOT
   type        = string
-  default     = "main"
+  default     = "bootstrap-apply"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.github_apply_environment))
+    error_message = "github_apply_environment must be 1-64 chars of letters, digits, hyphen or underscore."
+  }
 }
 
 variable "create_oidc_provider" {

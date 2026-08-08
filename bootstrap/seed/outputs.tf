@@ -26,11 +26,25 @@ output "bootstrap_pipeline_role_arn" {
   description = <<-EOT
     Set as the GitHub Actions repository VARIABLE `AWS_BOOTSTRAP_ROLE_ARN`.
 
+    The APPLY role. AdministratorAccess, and assumable only by a job running in the
+    approval Environment.
+
     A variable, not a secret: a role ARN is not confidential, and treating
     non-secrets as secrets makes the real secrets harder to audit. What protects
     this role is its trust policy, not the obscurity of its name.
   EOT
   value       = aws_iam_role.bootstrap_pipeline.arn
+}
+
+output "bootstrap_plan_role_arn" {
+  description = <<-EOT
+    Set as the GitHub Actions repository VARIABLE `AWS_PLAN_ROLE_ARN`.
+
+    The PLAN role. Read-only plus permission to hold the state lock, assumable from
+    pull requests. Separate from the apply role because a pull request and an
+    approved deployment carry different `sub` claims, so one role cannot serve both.
+  EOT
+  value       = aws_iam_role.bootstrap_plan.arn
 }
 
 output "management_account_id" {
@@ -43,7 +57,16 @@ output "region" {
   value       = var.region
 }
 
-output "trusted_github_subject" {
-  description = "The exact `sub` claim permitted to assume the pipeline role. Emitted so a trust failure can be diagnosed by comparing it against the token's actual claim."
-  value       = local.github_sub_main
+output "trusted_github_subjects" {
+  description = <<-EOT
+    The exact `sub` claims each role accepts.
+
+    Emitted because a trust failure gives no useful message. GitHub Actions prints
+    the token's actual claim in the job log, and diagnosing the failure is a
+    character-by-character comparison against these values.
+  EOT
+  value = {
+    plan  = [local.github_sub_any_branch]
+    apply = [local.github_sub_apply_environment]
+  }
 }

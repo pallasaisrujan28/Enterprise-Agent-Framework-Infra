@@ -29,18 +29,22 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 locals {
+  # "The provider's ARN, however we got it." Everything downstream uses this one
+  # name and does not care which branch of the toggle produced it.
+  #
+  # The `[0]` is required because `count` turns a single thing into a list, even a
+  # list of one. The two counts above are opposites, so exactly one side exists at a
+  # time, and the conditional never evaluates the side that does not.
   github_oidc_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
-
-  # The `sub` claim GitHub puts in the token. Its shape depends on the trigger,
-  # which is what makes ref-scoping possible at all:
-  #
-  #   repo:<owner>/<repo>:ref:refs/heads/main      push to main
-  #   repo:<owner>/<repo>:pull_request             pull request event
-  #   repo:<owner>/<repo>:environment:<name>       job declaring `environment:`
-  #
-  # This role uses the first form. The environment form is the stronger control
-  # and is used by the per-account CI roles later: a token only carries an
-  # environment claim if the job actually ran in that GitHub Environment, so where
-  # that environment requires reviewers, the claim proves a human approved it.
-  github_sub_main = "repo:${var.github_repository}:ref:refs/heads/${var.github_branch}"
 }
+
+# NOTE: the `sub` claim strings used to live here and have MOVED to iam.tf.
+#
+# They were misleading in this file. This file creates the OIDC provider, and the
+# provider knows nothing about repositories, branches or environments — it stores
+# only an issuer URL and an allowed audience. Repository and branch scoping is a
+# property of each ROLE's trust policy, so the strings belong next to the roles.
+#
+# Nothing changed behaviourally by moving them. Terraform reads every .tf file in a
+# directory as one flat namespace, so a `locals` block behaves identically wherever
+# it sits. The move is for whoever reads this next.
