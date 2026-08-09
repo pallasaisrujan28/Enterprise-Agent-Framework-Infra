@@ -1,9 +1,9 @@
-# APPLY. Manual only, and gated on a human approval.
+# APPLY. Merge to main, or manual dispatch. Always gated on a human approval.
 #
-# TWO JOBS, AND THE ORDER IS THE POINT.
+# TWO PHASES, AND THE ORDER IS THE POINT.
 #
-#   1. plan    - read-only role, no gate. Produces and PRINTS the plan.
-#   2. apply   - admin role, behind the approval gate. Applies THAT SAVED PLAN.
+#   plan   - read-only role, no gate. Produces and PRINTS the plan.
+#   apply  - admin role, behind the approval gate. Applies THAT SAVED PLAN.
 #
 # The reviewer therefore approves a plan they can read. A single job would ask for
 # approval first and generate the plan afterwards, so the approval would be for
@@ -29,10 +29,26 @@
 #
 # Until reviewers are configured the Environment exists but approves nothing. AWS can
 # only check the Environment's NAME, not that anyone clicked approve.
+#
+# NOTE ON THE BOOTSTRAP LAYERS AND BRANCHES: these layers have exactly one target,
+# the management account, and one state file each. So there is no dev copy to apply a
+# branch into, and no branch-per-environment split. That model starts at the
+# accounts/ and workloads/ layers, once EAF-DEV and EAF-PROD exist.
 
 name: apply
 
 on:
+  # Merging to main is the normal trigger. The approval gate is still in the way, so
+  # "merged" and "applied" remain separate events — but nobody has to remember to
+  # dispatch a workflow by hand for a routine change.
+  push:
+    branches: [main]
+    paths:
+      - "bootstrap/organization/**"
+      - "scripts/**"
+
+  # Manual dispatch stays for two cases: the first account-creation run, which needs
+  # emails typed in, and applying the seed layer.
   workflow_dispatch:
     inputs:
       layer:
@@ -47,11 +63,11 @@ on:
         required: true
         type: string
       dev_account_email:
-        description: "EAF-DEV root email. Leave blank to use the repository variable. CANNOT BE CHANGED after the account exists."
+        description: "EAF-DEV root email. Blank uses the repository variable. CANNOT BE CHANGED once the account exists."
         required: false
         type: string
       prod_account_email:
-        description: "EAF-PROD root email. Leave blank to use the repository variable. CANNOT BE CHANGED after the account exists."
+        description: "EAF-PROD root email. Blank uses the repository variable. CANNOT BE CHANGED once the account exists."
         required: false
         type: string
 
@@ -59,31 +75,44 @@ permissions:
   id-token: write
   contents: read
 
-concurrency:
-  # NOT cancel-in-progress. Cancelling a running apply can leave state locked and
-  # resources half-created, and for account creation that is unrecoverable.
-  group: apply-${{ inputs.layer }}
-  cancel-in-progress: false
-
 env:
   TF_VERSION: 1.13.3
   TF_IN_AUTOMATION: "true"
 
 jobs:
+  # Resolves the layer once, so nothing downstream has to cope with `inputs.layer`
+  # being empty on a push. A job output rather than a workflow-level `env`, because
+  # `env` is not available in a job-level `if:`.
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      layer: ${{ steps.pick.outputs.layer }}
+    steps:
+      - name: pick the layer and check the confirmation
+        id: pick
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.confirm }}" != "apply" ]]; then
+              echo "confirmation was not the word apply - stopping" >&2
+              exit 1
+            fi
+            layer="${{ inputs.layer }}"
+          else
+            # A push to main only ever applies the organization layer. Seed runs from
+            # a laptop and must not be applied by a merge.
+            layer="organization"
+          fi
+          echo "layer=$layer" >> "$GITHUB_OUTPUT"
+          echo "layer: $layer"
+
   plan:
-    name: plan ${{ inputs.layer }}
+    name: plan
+    needs: resolve
     runs-on: ubuntu-latest
     outputs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
     steps:
-      - name: check the confirmation
-        run: |
-          set -euo pipefail
-          if [[ "${{ inputs.confirm }}" != "apply" ]]; then
-            echo "confirmation was not the word apply - stopping" >&2
-            exit 1
-          fi
-
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
@@ -98,31 +127,31 @@ jobs:
           role-session-name: eaf-preapply-plan-${{ github.run_id }}
 
       - name: build the accounts variable
-        if: inputs.layer == 'organization'
+        if: needs.resolve.outputs.layer == 'organization'
         env:
           # A blank workflow input falls back to the stored repository variable, so a
-          # routine re-run never has to retype an address. Emails MUST be stable:
-          # AWS Organizations has no API to change one after creation.
+          # routine run never has to retype an address, and a push has none to give.
+          # Emails MUST be stable: AWS Organizations has no API to change one.
           EAF_DEV_ACCOUNT_EMAIL: ${{ inputs.dev_account_email || vars.EAF_DEV_ACCOUNT_EMAIL }}
           EAF_PROD_ACCOUNT_EMAIL: ${{ inputs.prod_account_email || vars.EAF_PROD_ACCOUNT_EMAIL }}
         run: bash scripts/write-accounts-tfvars.sh bootstrap/organization/accounts.tfvars.json
 
       - name: plan
         id: plan
-        working-directory: bootstrap/${{ inputs.layer }}
+        working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
 
           args=(-no-color -input=false -lock-timeout=5m -out=tfplan
                 -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}")
-          if [[ "${{ inputs.layer }}" == "organization" ]]; then
+          if [[ "${{ needs.resolve.outputs.layer }}" == "organization" ]]; then
             args+=(-var="state_bucket=${{ vars.AWS_STATE_BUCKET }}"
                    -var-file=accounts.tfvars.json)
           fi
 
           # -detailed-exitcode: 0 no changes, 1 error, 2 changes present. Used so the
-          # apply job can be skipped when there is nothing to do, instead of asking a
+          # apply job is skipped when there is nothing to do, rather than asking a
           # human to approve a no-op.
           set +e
           terraform plan "${args[@]}" -detailed-exitcode | tee plan.txt
@@ -136,48 +165,53 @@ jobs:
           esac
 
       - name: validate the SCP
-        if: inputs.layer == 'organization'
-        working-directory: bootstrap/organization
+        if: needs.resolve.outputs.layer == 'organization'
         run: |
           set -euo pipefail
-          terraform show -json tfplan > plan.json
-          cd "$GITHUB_WORKSPACE"
+          terraform -chdir=bootstrap/organization show -json tfplan > bootstrap/organization/plan.json
           bash scripts/check-policies.sh bootstrap/organization/plan.json policy-out
 
       - name: summary
         if: always()
-        working-directory: bootstrap/${{ inputs.layer }}
+        working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
         run: |
           {
-            echo "## ${{ inputs.layer }} - awaiting approval"
+            echo "## ${{ needs.resolve.outputs.layer }} - awaiting approval"
             echo '```'
             grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
             echo '```'
-            if [[ "${{ inputs.layer }}" == "organization" ]]; then
-              echo "**Read the full plan below before approving.** Creating an AWS"
-              echo "account is effectively permanent: closure takes 90 days and a"
-              echo "closed account still counts against the organization quota."
+            if [[ "${{ needs.resolve.outputs.layer }}" == "organization" ]]; then
+              echo "**Read the full plan in the job log before approving.** Creating"
+              echo "an AWS account is effectively permanent: closure takes 90 days and"
+              echo "a closed account still counts against the organization quota."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tfplan-${{ inputs.layer }}-${{ github.run_id }}
+          name: tfplan-${{ needs.resolve.outputs.layer }}-${{ github.run_id }}
           path: |
-            bootstrap/${{ inputs.layer }}/tfplan
-            bootstrap/${{ inputs.layer }}/plan.txt
+            bootstrap/${{ needs.resolve.outputs.layer }}/tfplan
+            bootstrap/${{ needs.resolve.outputs.layer }}/plan.txt
           retention-days: 5
 
   apply:
-    name: apply ${{ inputs.layer }}
-    needs: plan
+    name: apply
+    needs: [resolve, plan]
     if: needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
 
     # THE GATE. This single line is what rewrites the `sub` claim to the environment
     # form, which is the only claim the admin role accepts. Remove it and the apply
-    # role becomes unassumable — the failure is AccessDenied, not a missing approval.
+    # role becomes unassumable — and the failure is AccessDenied, which does not
+    # mention approval at all.
     environment: ${{ vars.AWS_APPLY_ENVIRONMENT || 'bootstrap-apply' }}
+
+    # Not at workflow level, because a cancelled apply can leave state locked and
+    # resources half-created. For account creation that is unrecoverable.
+    concurrency:
+      group: apply-${{ needs.resolve.outputs.layer }}
+      cancel-in-progress: false
 
     steps:
       - uses: actions/checkout@v4
@@ -189,8 +223,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: tfplan-${{ inputs.layer }}-${{ github.run_id }}
-          path: bootstrap/${{ inputs.layer }}
+          name: tfplan-${{ needs.resolve.outputs.layer }}-${{ github.run_id }}
+          path: bootstrap/${{ needs.resolve.outputs.layer }}
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -209,28 +243,27 @@ jobs:
           echo "account $actual"
 
       - name: apply the saved plan
-        working-directory: bootstrap/${{ inputs.layer }}
+        working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
 
           # Applying the SAVED plan, not re-planning. Terraform refuses if state moved
-          # since the plan was made ("Saved plan is stale"), which is the behaviour we
-          # want: it means the plan the reviewer read is no longer what would happen.
+          # since the plan was made ("Saved plan is stale"), which is what we want: it
+          # means the plan the reviewer read is no longer what would happen.
           #
           # Seen once in this project: that error appeared AFTER the apply had already
-          # landed and written state. Cause never determined. So on a stale-plan
-          # error, verify the real end state with `terraform plan` before re-running
-          # anything.
+          # landed and written state. Cause never determined. So on a stale-plan error,
+          # verify the real end state with `terraform plan` before re-running anything.
           #
           # No -auto-approve. A saved plan file is already the approval.
           terraform apply -no-color -input=false -lock-timeout=5m tfplan
 
       - name: outputs
-        working-directory: bootstrap/${{ inputs.layer }}
+        working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
         run: |
           {
-            echo "## ${{ inputs.layer }} applied"
+            echo "## ${{ needs.resolve.outputs.layer }} applied"
             echo '```'
             terraform output -no-color
             echo '```'
@@ -238,10 +271,12 @@ jobs:
 
   no_changes:
     name: nothing to apply
-    needs: plan
+    needs: [resolve, plan]
     if: needs.plan.outputs.has_changes == 'false'
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "### ${{ inputs.layer }}: no changes" >> "$GITHUB_STEP_SUMMARY"
-          echo "Plan reported no differences, so no approval was requested." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### ${{ needs.resolve.outputs.layer }}: no changes"
+            echo "Plan reported no differences, so no approval was requested."
+          } >> "$GITHUB_STEP_SUMMARY"

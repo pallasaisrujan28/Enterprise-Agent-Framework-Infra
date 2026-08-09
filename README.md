@@ -57,12 +57,103 @@ has a scoped policy for `*.tflock` objects only, so "read-only" stays true of st
 |---|---|---|
 | `checks` | every push | none |
 | `plan` | push touching `bootstrap/**` | plan role |
-| `apply` | manual only | plan role, then apply role behind the gate |
+| `apply` | push to `main`, or manual dispatch | plan role, then apply role behind the gate |
 
-`apply` runs two jobs on purpose. The first plans with the read-only role and prints
+`apply` runs two phases on purpose. The first plans with the read-only role and prints
 the result. The second waits for approval, then applies **that saved plan**. So the
 reviewer approves a plan they can read, rather than approving a plan that gets
 generated afterwards.
+
+Manual dispatch stays for two cases: the first account-creation run, which needs
+emails typed in, and applying `seed`.
+
+## Branching model
+
+**One rule: `main` is prod, every other branch is dev.** No branch-name prefix is
+required or recognised — nothing in this repository matches `feature/` or any other
+convention.
+
+| Branch | Bootstrap layers | Dev account layers | Prod account layers |
+|---|---|---|---|
+| any branch except `main` | plan only | **apply, no approval** | nothing |
+| `main` | plan, then gated apply | apply | plan, then gated apply |
+
+### Why the bootstrap layers have no dev/prod split
+
+Branch-per-environment assumes two copies of the same thing. The bootstrap layers have
+one target — the management account — and one state file each. There is no dev copy of
+an organization to practise on, and `EAF-DEV` is not somewhere this code deploys into,
+it is something this code creates.
+
+Two environments need two state files. Bootstrap has one because it has one target.
+
+### Why any branch may apply to dev without approval
+
+Because the ceiling is enforced **above** the account, not by reviewing each change:
+
+- The **SCP** on the `Workloads` OU applies to `EAF-DEV` exactly as it does to prod. A
+  developer cannot create an IAM user, cannot make S3 public, cannot call Bedrock
+  outside London. That holds regardless of what their Terraform says and cannot be
+  overridden from inside the account.
+- The **permissions boundary** created by the account-baseline layer caps the dev
+  pipeline role.
+- Control Tower's controls apply, because the OU is enrolled.
+
+So unreviewed code reaching dev is a cheap mistake, not a dangerous one.
+
+### The trade in dev, stated plainly
+
+One dev account, one state file. If two branches apply, dev reflects whichever ran
+last. The state lock prevents corruption — the second run waits — but it does not stop
+one change overwriting another. Acceptable for a small team where dev is disposable.
+
+The escape hatch, if it ever hurts, is per-branch state:
+
+```hcl
+key = "workloads/dev/${branch}/terraform.tfstate"
+```
+
+That creates real AWS resources per branch, which cost money and get forgotten. Do not
+start there.
+
+### The dev role's trust condition, when that layer is built
+
+"Any branch except main" is two conditions on the same key, which IAM ANDs together:
+
+```hcl
+condition {
+  test     = "StringLike"
+  variable = "token.actions.githubusercontent.com:sub"
+  values   = ["repo:${var.github_repository}:ref:refs/heads/*"]
+}
+
+condition {
+  test     = "StringNotEquals"
+  variable = "token.actions.githubusercontent.com:sub"
+  values   = ["repo:${var.github_repository}:ref:refs/heads/main"]
+}
+```
+
+### Open question worth deciding before that layer lands
+
+If `main` never applies to dev, dev permanently reflects whichever branch applied last
+and never converges on what was merged. The usual fix is for `main` to apply to dev
+first and then to prod behind the gate, so dev always matches merged code. That still
+satisfies "every non-main branch goes to dev only".
+
+### Local iteration on dev
+
+Merging in order to test is the wrong loop. For dev, apply from your machine:
+
+```bash
+aws sso login --profile eaf-dev
+cd accounts/dev
+terraform init -backend-config=backend.hcl
+terraform apply
+```
+
+State still lives in S3, so this is not a private copy and the lock still applies.
+Allowed for dev only. Prod gets no human credentials, only the gated pipeline.
 
 ## One-time setup
 
