@@ -1070,7 +1070,149 @@ directory with a Makefile target. Nothing here has yet.
 
 ---
 
-## 23. Ideas parked for later
+## 23. The OIDC subject format changed, and every example is now wrong
+
+The first pipeline run failed with:
+
+```
+Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+That message names no condition and no claim. It is the same for a wrong repo, a
+wrong branch, a wrong audience, and a wrong subject format.
+
+### The cause
+
+Every published example, and the first version of `iam.tf`, used:
+
+```
+repo:<owner>/<repo>:ref:refs/heads/*
+```
+
+GitHub sends something else. The real claim, measured:
+
+```
+repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:ref:refs/heads/feature/bootstrap-organization
+```
+
+Numeric ids are embedded. Repositories created after **2026-07-15** use this
+immutable default format. It does not apply to GitHub Enterprise Server.
+
+- [GitHub changelog](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/)
+- [Microsoft's migration guidance](https://learn.microsoft.com/en-gb/entra/workload-id/workload-identities-github-immutable-subjects)
+
+It is a security improvement, not an annoyance. The ids are assigned once and never
+reused, so renaming, transferring, or deleting and recreating a repository does not
+carry the old trust across. Under the name-based format, a deleted repository's name
+could be claimed by someone else and inherit its AWS access.
+
+### The API lies about it
+
+```bash
+gh api repos/OWNER/REPO/actions/oidc/customization/sub
+```
+
+returned:
+
+```json
+{
+  "use_default": true,
+  "use_immutable_subject": false,
+  "sub_claim_prefix": "repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608"
+}
+```
+
+`use_immutable_subject: false`, and the token uses the immutable form regardless. So
+**the token is the only authoritative source.**
+
+### How to read the real claim
+
+A temporary `workflow_dispatch` workflow. Decode the payload, print an allow-list of
+fields, and **never print the token** — the payload is not a credential, the token is,
+and a build log in a public repository is readable by anyone.
+
+```yaml
+permissions:
+  id-token: write
+steps:
+  - uses: actions/github-script@v7
+    with:
+      script: |
+        const token = await core.getIDToken('sts.amazonaws.com')
+        const payload = JSON.parse(
+          Buffer.from(token.split('.')[1], 'base64url').toString('utf8')
+        )
+        for (const key of ['iss', 'aud', 'sub', 'repository', 'repository_id',
+                           'repository_owner_id', 'ref', 'environment']) {
+          core.info(`${key} = ${payload[key] ?? '(absent)'}`)
+        }
+```
+
+Delete it once the trust policy is confirmed. Ten minutes of measuring beat an
+unknown number of rounds of guessing at a string format.
+
+### Why not condition on `repository_id` instead
+
+The token also carries `repository_id` and `repository_owner_id` as their own claims,
+which would avoid parsing a composite string. Not used, because the sources disagree:
+
+- GitHub's AWS guide says custom OIDC claims are unsupported in AWS and recommends
+  evaluating `token.actions.githubusercontent.com:sub`.
+- Later reporting says AWS STS added provider-specific GitHub claims as condition keys.
+
+The cost of being wrong is asymmetric. **An unrecognised condition key does not
+error** — the statement simply never matches, so every run is denied and it presents
+as a trust bug rather than an unsupported feature. `sub` is agreed by both sources and
+measured working.
+
+Revisit only with a verified assume-role call, never with a documentation link.
+
+### Assemble it, do not paste it
+
+```hcl
+locals {
+  repo_owner = split("/", var.github_repository)[0]
+  repo_name  = split("/", var.github_repository)[1]
+
+  github_sub_prefix = "repo:${local.repo_owner}@${var.github_repository_owner_id}/${local.repo_name}@${var.github_repository_id}"
+
+  github_sub_any_branch        = "${local.github_sub_prefix}:ref:refs/heads/*"
+  github_sub_apply_environment = "${local.github_sub_prefix}:environment:${var.github_apply_environment}"
+}
+```
+
+`var.github_repository` stays the single place the repository is named. The ids come
+from validated numeric variables:
+
+```bash
+gh api repos/OWNER/REPO --jq '{id: .id, owner_id: .owner.id}'
+```
+
+### Also learned in that run
+
+**A new branch does not trigger path-filtered workflows.** `plan.yml` has
+`paths: ["bootstrap/**", ...]` and did not run on the first push of a new branch. It
+ran on the second push. If a workflow mysteriously does not start on a branch you just
+created, this is why.
+
+**tflint earns its place immediately.** It caught two dead declarations on the first
+run: a `terraform_remote_state` read of the seed layer that nothing consumed, and an
+unused `local.account_id`. Removing the first made `var.state_bucket` unused too,
+which had been passed by both workflows, the Makefile and the README.
+
+**tflint is not in homebrew-core.** `brew install tflint` fails and suggests unrelated
+formulae. It needs the tap:
+
+```bash
+brew install terraform-linters/tap/tflint
+```
+
+CI installs it through `terraform-linters/setup-tflint`, so a green CI run does not
+mean the local `make lint` target works.
+
+---
+
+## 24. Ideas parked for later
 
 **Account creation through a request workflow.** A Jira board or form feeding an
 approval that triggers the account-creation pipeline, rather than a hand-run
