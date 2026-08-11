@@ -59,6 +59,51 @@ variable "github_repository" {
   }
 }
 
+variable "github_repository_owner_id" {
+  description = <<-EOT
+    The GitHub account's numeric id, which appears in the OIDC token's `sub` claim.
+
+    Needed because GitHub changed the default subject format. Repositories created
+    after 2026-07-15 get immutable numeric ids embedded in `sub`:
+
+        repo:<owner>@<owner_id>/<repo>@<repository_id>
+
+    Get it from the repository itself, or from a token:
+
+        gh api repos/<owner>/<repo> --jq .owner.id
+
+    Do not guess this. A wrong value produces "Not authorized to perform
+    sts:AssumeRoleWithWebIdentity" with no indication of which condition missed.
+  EOT
+  type        = string
+  default     = "194785418"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_owner_id))
+    error_message = "github_repository_owner_id must be numeric."
+  }
+}
+
+variable "github_repository_id" {
+  description = <<-EOT
+    The repository's numeric id, which appears in the OIDC token's `sub` claim.
+
+        gh api repos/<owner>/<repo> --jq .id
+
+    Immutable and never reused. That is the point of the change: renaming,
+    transferring, or deleting and recreating the repository does NOT carry the old
+    trust across. Under the older name-based format, a deleted repository's name
+    could be claimed by someone else and inherit its AWS access.
+  EOT
+  type        = string
+  default     = "1324052608"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_id))
+    error_message = "github_repository_id must be numeric."
+  }
+}
+
 # NOTE: there is no `github_branch` variable.
 #
 # An earlier version pinned the single admin role to `refs/heads/main`. Removed

@@ -49,18 +49,55 @@
 # GitHub writes the whole string from the real run and signs it. A workflow cannot
 # set it. That signature is the only reason AWS can trust any of it.
 locals {
+  # Split rather than take owner and name as separate variables, so
+  # `var.github_repository` stays the single place the repository is named.
+  repo_owner = split("/", var.github_repository)[0]
+  repo_name  = split("/", var.github_repository)[1]
+
+  # THE IMMUTABLE SUBJECT PREFIX. Read this before changing anything here.
+  #
+  # Every published example, and the first version of this file, used:
+  #
+  #     repo:<owner>/<repo>
+  #
+  # That is WRONG for this repository, and the failure is a bare "Not authorized to
+  # perform sts:AssumeRoleWithWebIdentity" with no hint as to which condition missed.
+  #
+  # GitHub changed the default subject format. Repositories created after
+  # 2026-07-15 get immutable numeric IDs embedded in `sub`:
+  #
+  #     repo:<owner>@<owner_id>/<repo>@<repository_id>
+  #
+  # Measured from a real token rather than taken from documentation, because
+  # `GET /repos/{owner}/{repo}/actions/oidc/customization/sub` reports
+  # `use_immutable_subject: false` while the token uses the immutable form anyway.
+  # The observed claim was:
+  #
+  #     repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:ref:refs/heads/feature/bootstrap-organization
+  #
+  # This is a security improvement, not an inconvenience. The IDs are assigned once
+  # and never reused, so renaming, transferring, or deleting and recreating the
+  # repository does NOT keep the old trust. Under the name-based format, a deleted
+  # repository's name could be claimed by someone else and inherit its access.
+  #
+  # See:
+  #   https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/
+  #   https://learn.microsoft.com/en-gb/entra/workload-id/workload-identities-github-immutable-subjects
+  #
+  # NOTE for GitHub Enterprise Server, which the rollout excludes: there the format
+  # is still `repo:<owner>/<repo>`, so both IDs would need to be dropped from here.
+  github_sub_prefix = "repo:${local.repo_owner}@${var.github_repository_owner_id}/${local.repo_name}@${var.github_repository_id}"
+
   # ANY BRANCH, for the read-only plan role.
   #
   # The `ref:refs/heads/` form rather than `pull_request`. Both would work, but the
-  # pull-request claim is `repo:<owner>/<repo>:pull_request` and says nothing about
-  # WHICH branch. The ref form carries the branch name, so it stays visible in
-  # CloudTrail and available to any future narrowing.
+  # pull-request claim carries no branch name. The ref form does, so the branch stays
+  # visible in CloudTrail and available to any future narrowing.
   #
-  # The wildcard's POSITION is the control. `repo:<owner>/<repo>:*` is the dangerous
-  # pattern, because it also matches `:environment:<name>` and would hand the
-  # approval-gated identity to any branch. Keeping the literal `ref:refs/heads/`
-  # prefix makes that impossible — this value cannot match an environment claim.
-  github_sub_any_branch = "repo:${var.github_repository}:ref:refs/heads/*"
+  # The wildcard's POSITION is the control. A trailing `*` on the whole prefix would
+  # also match `:environment:<name>` and hand the approval-gated identity to any
+  # branch. Keeping the literal `ref:refs/heads/` makes that impossible.
+  github_sub_any_branch = "${local.github_sub_prefix}:ref:refs/heads/*"
 
   # The environment form, for the admin apply role. The strongest of the three,
   # because GitHub will not put an environment claim in a token unless the job
@@ -68,8 +105,25 @@ locals {
   # claim is therefore evidence a human approved THIS run.
   #
   # Branch protection cannot prove that. It proves code reached main.
-  github_sub_apply_environment = "repo:${var.github_repository}:environment:${var.github_apply_environment}"
+  github_sub_apply_environment = "${local.github_sub_prefix}:environment:${var.github_apply_environment}"
 }
+
+# WHY THIS CONDITIONS ON `sub` AND NOT ON `repository_id` DIRECTLY.
+#
+# The token also carries `repository_id` and `repository_owner_id` as separate claims,
+# which would be tidier than parsing them out of a composite string.
+#
+# Not used, because the sources disagree on whether AWS accepts them as condition
+# keys. GitHub's own AWS guide states custom OIDC claims are unsupported in AWS and
+# recommends evaluating `token.actions.githubusercontent.com:sub`. Later reporting says
+# AWS STS added provider-specific GitHub claims as condition keys.
+#
+# The cost of being wrong is not symmetric. An unrecognised condition key does not
+# error — the statement simply never matches, so every run is denied and it presents
+# as a trust bug rather than an unsupported feature. `sub` is agreed by both sources
+# to work, and it is measured working here.
+#
+# Revisit only with a verified assume-role call, not with a documentation link.
 #
 # The permissions on the admin role cannot meaningfully be reduced — it creates
 # accounts, OUs and SCPs, and no AWS-managed policy covers Organizations
