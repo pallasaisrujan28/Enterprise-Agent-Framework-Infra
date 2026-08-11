@@ -1,0 +1,43 @@
+# TEMPORARY DIAGNOSTIC. Delete once the trust policy is confirmed.
+#
+# Prints the CLAIMS GitHub actually puts in the OIDC token, so the trust policy can be
+# written against the real value instead of the documented one. Needed because this
+# account reports a `sub_claim_prefix` containing numeric immutable IDs
+# (owner@194785418/repo@1324052608), which does not match the documented
+# `repo:<owner>/<repo>` form.
+#
+# NEVER prints the token itself. The payload is not a credential; the signature is
+# what makes a token usable, and only decoded claim fields are echoed. Printing the
+# raw token in a public repository log would hand someone a usable credential for its
+# lifetime.
+#
+# No AWS credentials are configured here. It only asks GitHub for a token.
+
+name: debug-oidc
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  claims:
+    runs-on: ubuntu-latest
+    steps:
+      - name: print the claims
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com')
+            const payload = JSON.parse(
+              Buffer.from(token.split('.')[1], 'base64url').toString('utf8')
+            )
+            // Allow-list the fields. Printing the whole payload risks echoing
+            // something unexpected in a future GitHub change.
+            for (const key of ['iss', 'aud', 'sub', 'repository', 'repository_id',
+                               'repository_owner', 'repository_owner_id', 'ref',
+                               'environment', 'workflow_ref']) {
+              core.info(`${key} = ${payload[key] ?? '(absent)'}`)
+            }
