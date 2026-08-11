@@ -10,7 +10,6 @@
 LAYERS      := bootstrap/seed bootstrap/organization
 TF_VERSION  := 1.13.3
 ACCOUNT_ID  := 193027353132
-STATE_BUCKET := eaf-bootstrap-tfstate-193027353132
 
 .PHONY: help format fmt validate lint checks plan-seed plan-org policy-check clean
 
@@ -40,7 +39,10 @@ validate:
 # check that silently does nothing reports success and is worse than no check.
 lint:
 	@command -v tflint >/dev/null || { \
-	  echo "tflint not installed. brew install tflint"; exit 1; }
+	  echo "tflint not installed. It is NOT in homebrew-core; it needs the tap:"; \
+	  echo "  brew install terraform-linters/tap/tflint"; \
+	  echo "CI installs it via terraform-linters/setup-tflint, so a green CI run"; \
+	  echo "does not mean this works locally."; exit 1; }
 	tflint --init
 	tflint --recursive --format compact
 
@@ -63,7 +65,6 @@ plan-org:
 	terraform init -input=false -no-color -backend-config=backend.hcl && \
 	terraform plan -no-color -input=false -out=tfplan \
 	  -var="management_account_id=$(ACCOUNT_ID)" \
-	  -var="state_bucket=$(STATE_BUCKET)" \
 	  -var-file=accounts.tfvars.json && \
 	terraform show -json tfplan > plan.json
 

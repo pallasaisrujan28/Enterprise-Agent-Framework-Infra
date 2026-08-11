@@ -48,29 +48,28 @@ provider "aws" {
   }
 }
 
-# Read the seed layer's outputs rather than hardcoding them. A copied ARN drifts
-# silently the moment seed changes, and the failure appears as a permission error
-# with no obvious cause.
-data "terraform_remote_state" "seed" {
-  backend = "s3"
+# NO `terraform_remote_state` READ OF THE SEED LAYER, and that is deliberate.
+#
+# An earlier version declared one, intending to pull seed's outputs. tflint caught it
+# as declared-but-unused, which was correct: this layer needs exactly one thing from
+# seed: the bucket its own state lives in, and that comes from `backend.hcl`.
+#
+# Removed rather than wired up. Reading another layer's state means this layer needs
+# read access to it and fails if seed's state moves, in exchange for a value the
+# pipeline already has. A narrow variable is the looser coupling.
 
-  config = {
-    bucket = var.state_bucket
-    key    = "bootstrap/seed/terraform.tfstate"
-    region = var.region
-  }
-}
-
-data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 data "aws_organizations_organization" "current" {}
 
 locals {
-  account_id = data.aws_caller_identity.current.account_id
-  partition  = data.aws_partition.current.partition
+  partition = data.aws_partition.current.partition
 
   # The organizational root — the top of the OU tree. NOT the management account,
   # despite both being called "root" in AWS's own docs. Read from the API rather
   # than hardcoded as "r-inc0", so this configuration is not tied to one org.
   org_root_id = data.aws_organizations_organization.current.roots[0].id
 }
+
+# NOTE: no `aws_caller_identity` and no `local.account_id` either. Also flagged
+# unused by tflint. The account guard is already enforced by `allowed_account_ids` on
+# the provider above, which fails before any API call rather than after.

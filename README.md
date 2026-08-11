@@ -189,7 +189,6 @@ secrets harder to audit.
 |---|---|
 | `AWS_REGION` | `eu-west-2` |
 | `AWS_MANAGEMENT_ACCOUNT_ID` | `193027353132` |
-| `AWS_STATE_BUCKET` | `eaf-bootstrap-tfstate-193027353132` |
 | `AWS_PLAN_ROLE_ARN` | `arn:aws:iam::193027353132:role/eaf-bootstrap-plan-role` |
 | `AWS_BOOTSTRAP_ROLE_ARN` | `arn:aws:iam::193027353132:role/eaf-bootstrap-pipeline-role` |
 | `EAF_DEV_ACCOUNT_EMAIL` | a unique address you control |

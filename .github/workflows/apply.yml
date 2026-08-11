@@ -146,8 +146,7 @@ jobs:
           args=(-no-color -input=false -lock-timeout=5m -out=tfplan
                 -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}")
           if [[ "${{ needs.resolve.outputs.layer }}" == "organization" ]]; then
-            args+=(-var="state_bucket=${{ vars.AWS_STATE_BUCKET }}"
-                   -var-file=accounts.tfvars.json)
+            args+=(-var-file=accounts.tfvars.json)
           fi
 
           # -detailed-exitcode: 0 no changes, 1 error, 2 changes present. Used so the

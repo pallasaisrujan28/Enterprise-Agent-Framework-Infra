@@ -14,10 +14,16 @@ variable "management_account_id" {
   }
 }
 
-variable "state_bucket" {
-  description = "State bucket created by the seed layer. Passed in so this layer can read seed's outputs."
-  type        = string
-}
+# NOTE: there is no `state_bucket` variable.
+#
+# An earlier version had one, to feed a `terraform_remote_state` read of the seed
+# layer. tflint flagged the data source as declared-but-unused, correctly — nothing in
+# this layer consumed seed's outputs. Removing the data source left the variable
+# unused as well, so both went.
+#
+# The bucket this layer's own state lives in comes from `backend.hcl`, passed to
+# `terraform init -backend-config=backend.hcl`. That is a backend setting, not an
+# input variable, and it was never the same thing.
 
 variable "region" {
   description = "Region for this layer's own API calls. Organizations is global but the provider still needs one."

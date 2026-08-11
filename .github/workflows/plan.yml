@@ -126,7 +126,6 @@ jobs:
           terraform plan -no-color -input=false -lock-timeout=5m \
             -out=tfplan \
             -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
-            -var="state_bucket=${{ vars.AWS_STATE_BUCKET }}" \
             -var-file=accounts.tfvars.json \
             | tee plan.txt
 
