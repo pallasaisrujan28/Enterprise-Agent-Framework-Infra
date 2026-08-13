@@ -42,7 +42,7 @@ depending on the trigger.
 | Role | Permissions | Accepts `sub` | Used by |
 |---|---|---|---|
 | `eaf-bootstrap-plan-role` | `ReadOnlyAccess` + `*.tflock` writes | `repo:<owner>/<repo>:ref:refs/heads/*` | every plan |
-| `eaf-bootstrap-pipeline-role` | `AdministratorAccess` | `repo:<owner>/<repo>:environment:bootstrap-apply` | apply, after approval |
+| `eaf-bootstrap-pipeline-role` | `AdministratorAccess` | `repo:<owner>/<repo>:environment:management` | apply, after approval |
 
 The apply role deliberately does **not** also accept the main-branch claim. Allowing
 it would mean any push to main gets admin with no approval, which is what the gate
@@ -160,7 +160,7 @@ Allowed for dev only. Prod gets no human credentials, only the gated pipeline.
 ### 1. GitHub Environment — this is the approval gate
 
 ```
-Settings > Environments > New environment > bootstrap-apply
+Settings > Environments > New environment > management
   Required reviewers:    at least one person
   Deployment branches:   Selected branches -> main
 ```

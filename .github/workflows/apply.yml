@@ -13,7 +13,7 @@
 #
 # The apply role's trust policy accepts exactly one `sub` claim:
 #
-#   repo:<owner>/<repo>:environment:bootstrap-apply
+#   repo:<owner>/<repo>:environment:management
 #
 # GitHub only writes an environment claim when the job really ran in that
 # Environment. Where the Environment requires reviewers, the claim is evidence a
@@ -23,7 +23,7 @@
 # ONE-TIME SETUP, which Terraform is not doing here (see github_apply_environment in
 # bootstrap/seed/variables.tf):
 #
-#   Settings > Environments > New environment > bootstrap-apply
+#   Settings > Environments > New environment > management
 #     Required reviewers:    at least one person
 #     Deployment branches:   Selected branches -> main
 #
@@ -204,7 +204,7 @@ jobs:
     # form, which is the only claim the admin role accepts. Remove it and the apply
     # role becomes unassumable — and the failure is AccessDenied, which does not
     # mention approval at all.
-    environment: ${{ vars.AWS_APPLY_ENVIRONMENT || 'bootstrap-apply' }}
+    environment: ${{ vars.AWS_APPLY_ENVIRONMENT || 'management' }}
 
     # Not at workflow level, because a cancelled apply can leave state locked and
     # resources half-created. For account creation that is unrecoverable.

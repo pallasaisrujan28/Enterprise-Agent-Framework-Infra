@@ -1,0 +1,64 @@
+# TEMPORARY. Proves the apply path authenticates, WITHOUT applying anything.
+#
+# Why this exists: the branch-form claim was measured from a real token, but the
+# ENVIRONMENT form was inferred from it. Inferring a claim format is exactly what went
+# wrong before — every example said `repo:<owner>/<repo>` and GitHub was sending
+# immutable numeric ids.
+#
+# Finding out during the real apply would mean AccessDenied AFTER a human approved,
+# and the run that follows creates AWS accounts, which is effectively permanent.
+#
+# So: assume the admin role, print who we are, and stop. No terraform, no plan, no
+# apply. The role has AdministratorAccess, so this job deliberately does nothing else.
+#
+# Delete once green.
+
+name: verify-apply-auth
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    # The line under test. It rewrites the `sub` claim to the environment form, which
+    # is the only claim the admin role's trust policy accepts.
+    environment: management
+
+    steps:
+      - name: print the claim this job actually gets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com')
+            const payload = JSON.parse(
+              Buffer.from(token.split('.')[1], 'base64url').toString('utf8')
+            )
+            // Allow-listed fields only. Never the token itself: the payload is not a
+            // credential, the token is, and this repository is public.
+            for (const key of ['sub', 'aud', 'environment', 'ref']) {
+              core.info(`${key} = ${payload[key] ?? '(absent)'}`)
+            }
+
+      - name: assume the apply role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-verify-apply-auth-${{ github.run_id }}
+
+      - name: confirm the identity and the account
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity --output json
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2
+            exit 1
+          fi
+          echo "apply path authenticates against account $actual"

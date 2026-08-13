@@ -245,7 +245,7 @@ resource "aws_iam_role_policy" "bootstrap_plan_state_lock" {
 #
 # SETUP THIS DEPENDS ON, in GitHub repository settings:
 #
-#   Settings > Environments > New environment > "bootstrap-apply"
+#   Settings > Environments > New environment > "management"
 #     - Required reviewers: at least one person
 #     - Deployment branches: selected branches, `main` only
 #

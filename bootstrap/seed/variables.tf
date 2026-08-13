@@ -117,6 +117,19 @@ variable "github_apply_environment" {
     The GitHub Environment whose approval is required before an apply can reach
     AWS.
 
+    NAMED AFTER THE TARGET, NOT THE ACTION.
+
+    An earlier version called this `bootstrap-apply`, which named what the pipeline
+    does rather than where it goes. Environments are deployment targets, so the set is:
+
+        management   this account. Accounts, OUs and SCPs live here.
+        dev          EAF-DEV,  for the account and workload layers
+        prod         EAF-PROD, for the account and workload layers
+
+    `management` rather than `prod`, because the organization is not an environment of
+    the application, and reusing `prod` here would collide with the environment that
+    later deploys into EAF-PROD.
+
     This exact name goes inside the apply role's trust policy, so a job can only
     assume that role if it declares `environment:` with the same value. Rename it
     here and the workflow must be renamed in the same commit, or apply stops
@@ -140,7 +153,7 @@ variable "github_apply_environment" {
     check that anyone had to click approve. That half is yours to enforce.
   EOT
   type        = string
-  default     = "bootstrap-apply"
+  default     = "management"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.github_apply_environment))
