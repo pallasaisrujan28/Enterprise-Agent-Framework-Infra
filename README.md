@@ -6,6 +6,44 @@ Application code lives in a separate repository.
 New to Terraform? Read [`TERRAFORM-NOTES.md`](TERRAFORM-NOTES.md) first. It is written
 from the mistakes made in this repository, not from documentation.
 
+## Manual versus automated
+
+### Automated — happens without anyone doing anything
+
+| Trigger | What runs |
+|---|---|
+| push, any branch | `checks`: fmt, validate, tflint |
+| push touching `bootstrap/**` | `plan` both layers, render the SCP, Access Analyzer, negative control |
+| merge to `main` | `apply`: plans, uploads the plan, then waits |
+| after approval | applies that exact saved plan |
+
+### Manual — and why each one stays manual
+
+| Step | Why it cannot or should not be automated |
+|---|---|
+| Apply `bootstrap/seed` from a laptop, once | It creates the state bucket and the role the pipeline needs to authenticate. It cannot run in the pipeline it bootstraps. |
+| Approve an apply | The whole point. Creating an account is effectively permanent: closure takes 90 days and a closed account still counts against the quota. |
+| Choose the account emails | Globally unique, becomes the root user, and AWS has **no API to change it**. Wrong once is wrong forever. |
+| Create the GitHub Environment and reviewers | Possible via the GitHub Terraform provider, but that needs a permanently stored repo-admin token. Automating a five-minute task by adding a long-lived secret is the wrong trade. |
+| Branch protection on `main` | Same reason. |
+| Set repository variables | Same reason. Also chicken-and-egg: the role ARN comes from seed's output. |
+| Rotate credentials | A decision about trust, not a build step. |
+
+### The rule
+
+**Anything that creates or changes AWS resources is automated**, through Terraform, behind a plan that a human can read.
+
+Manual survives in exactly three places: the one layer that cannot bootstrap itself, the approval of irreversible actions, and GitHub account settings where automating would mean storing a token more powerful than the thing it configures.
+
+### Still to build, and how it will work
+
+| Layer | Trigger | Approval |
+|---|---|---|
+| `accounts/dev`, `workloads/dev` | any branch | none |
+| `accounts/prod`, `workloads/prod` | `main` | required |
+
+Same shape as this repo. No new manual steps.
+
 ## Layers
 
 Each layer is a separate directory with its own state file. A change to one cannot
