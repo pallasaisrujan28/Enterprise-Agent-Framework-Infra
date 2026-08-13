@@ -134,12 +134,31 @@ condition {
 }
 ```
 
-### Open question worth deciding before that layer lands
+### `main` promotes through dev, it does not skip it
 
-If `main` never applies to dev, dev permanently reflects whichever branch applied last
-and never converges on what was merged. The usual fix is for `main` to apply to dev
-first and then to prod behind the gate, so dev always matches merged code. That still
-satisfies "every non-main branch goes to dev only".
+Decided, following the pattern already in use on the agent code pipeline
+(`bitbucket-pipelines.yml`): `main` deploys to development automatically, then
+promotes upward behind manual gates.
+
+```
+any branch except main   ->  dev            automatic, no approval
+main                     ->  dev            automatic, no approval
+                         ->  prod           gated on approval
+```
+
+Without the middle step, dev permanently reflects whichever branch applied last and
+never converges on what was merged. Passing `main` through dev on the way to prod
+fixes that, and still satisfies "every non-main branch goes to dev only".
+
+### Role selection belongs to the Environment, not the workflow
+
+Also borrowed from that pipeline, where each deployment environment carries its own
+role ARN so an identical step definition reaches a different account.
+
+Today `apply.yml` reads `vars.AWS_BOOTSTRAP_ROLE_ARN` as a **repository** variable, so
+the workflow chooses the role. Better is an **environment** variable of the same name
+in each Environment, so the environment chooses and a job cannot reach the prod role by
+editing which variable it reads. Worth doing when `dev` and `prod` are created.
 
 ### Local iteration on dev
 
@@ -155,18 +174,50 @@ terraform apply
 State still lives in S3, so this is not a private copy and the lock still applies.
 Allowed for dev only. Prod gets no human credentials, only the gated pipeline.
 
+## Environments
+
+Named after the target, never after the action:
+
+| Environment | Target | Used by |
+|---|---|---|
+| `management` | management account `193027353132` | `bootstrap/seed`, `bootstrap/organization` |
+| `dev` | `EAF-DEV` | account and workload layers (not built yet) |
+| `prod` | `EAF-PROD` | account and workload layers (not built yet) |
+
+`management` rather than `prod` for bootstrap, because the organization is not an
+environment of the application, and reusing `prod` would collide with the environment
+that later deploys into `EAF-PROD`.
+
 ## One-time setup
 
-### 1. GitHub Environment — this is the approval gate
+### 1. GitHub Environment — DONE
+
+`management` exists with a required reviewer and `main` as its only deployment branch.
+Verify with:
+
+```bash
+gh api repos/OWNER/REPO/environments/management
+gh api repos/OWNER/REPO/environments/management/deployment-branch-policies
+```
+
+Two things AWS cannot check, so they matter:
+
+- AWS only sees the Environment's **name** in the claim. It cannot tell whether
+  reviewers are configured. Remove the reviewer and apply proceeds unattended while
+  the trust policy still matches.
+- The branch restriction is enforced by GitHub, not AWS. The trust policy accepts the
+  environment claim from any ref.
+
+### 2. Branch protection
 
 ```
-Settings > Environments > New environment > management
-  Required reviewers:    at least one person
-  Deployment branches:   Selected branches -> main
+Settings > Branches > rule for main
+  Require a pull request before merging
+  Do not allow bypassing
 ```
 
-Until reviewers are configured, the Environment exists but approves nothing. AWS can
-only check the Environment's name; it cannot check that anyone clicked approve.
+AWS cannot enforce this. It only sees what the token says. Branch protection is what
+makes `refs/heads/main` mean "reviewed".
 
 ### 2. Branch protection
 
