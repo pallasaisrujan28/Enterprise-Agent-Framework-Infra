@@ -34,6 +34,15 @@
 # the management account, and one state file each. So there is no dev copy to apply a
 # branch into, and no branch-per-environment split. That model starts at the
 # accounts/ and workloads/ layers, once EAF-DEV and EAF-PROD exist.
+#
+# HOW AN ACCOUNT GETS CREATED, end to end:
+#
+#   request-account workflow  stores the email in SSM, appends to the register,
+#                             opens a pull request
+#   plan on request/**        shows one account to add
+#   merge to main             triggers this workflow
+#   approval                  a human reads the plan and approves
+#   apply                     the account exists; the register output records it
 
 name: apply
 
@@ -44,11 +53,14 @@ on:
   push:
     branches: [main]
     paths:
-      - "bootstrap/organization/**"
+      - "bootstrap/org-structure/**"
+      - "accounts/**"
       - "scripts/**"
 
-  # Manual dispatch stays for two cases: the first account-creation run, which needs
-  # emails typed in, and applying the seed layer.
+  # Manual dispatch stays for the seed layer, and for re-running an apply without a
+  # new commit. It takes NO email inputs any more: the account set comes from
+  # accounts/register.yaml and the addresses from SSM, both read by Terraform. That is
+  # what makes this pipeline re-runnable rather than one-shot.
   workflow_dispatch:
     inputs:
       layer:
@@ -56,19 +68,11 @@ on:
         required: true
         type: choice
         options:
-          - organization
+          - org-structure
           - seed
       confirm:
         description: 'Type "apply" to confirm'
         required: true
-        type: string
-      dev_account_email:
-        description: "EAF-DEV root email. Blank uses the repository variable. CANNOT BE CHANGED once the account exists."
-        required: false
-        type: string
-      prod_account_email:
-        description: "EAF-PROD root email. Blank uses the repository variable. CANNOT BE CHANGED once the account exists."
-        required: false
         type: string
 
 permissions:
@@ -99,9 +103,9 @@ jobs:
             fi
             layer="${{ inputs.layer }}"
           else
-            # A push to main only ever applies the organization layer. Seed runs from
+            # A push to main only ever applies the org-structure layer. Seed runs from
             # a laptop and must not be applied by a merge.
-            layer="organization"
+            layer="org-structure"
           fi
           echo "layer=$layer" >> "$GITHUB_OUTPUT"
           echo "layer: $layer"
@@ -126,16 +130,6 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-preapply-plan-${{ github.run_id }}
 
-      - name: build the accounts variable
-        if: needs.resolve.outputs.layer == 'organization'
-        env:
-          # A blank workflow input falls back to the stored repository variable, so a
-          # routine run never has to retype an address, and a push has none to give.
-          # Emails MUST be stable: AWS Organizations has no API to change one.
-          EAF_DEV_ACCOUNT_EMAIL: ${{ inputs.dev_account_email || vars.EAF_DEV_ACCOUNT_EMAIL }}
-          EAF_PROD_ACCOUNT_EMAIL: ${{ inputs.prod_account_email || vars.EAF_PROD_ACCOUNT_EMAIL }}
-        run: bash scripts/write-accounts-tfvars.sh bootstrap/organization/accounts.tfvars.json
-
       - name: plan
         id: plan
         working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
@@ -145,10 +139,6 @@ jobs:
 
           args=(-no-color -input=false -lock-timeout=5m -out=tfplan
                 -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}")
-          if [[ "${{ needs.resolve.outputs.layer }}" == "organization" ]]; then
-            args+=(-var-file=accounts.tfvars.json)
-          fi
-
           # -detailed-exitcode: 0 no changes, 1 error, 2 changes present. Used so the
           # apply job is skipped when there is nothing to do, rather than asking a
           # human to approve a no-op.
@@ -164,11 +154,11 @@ jobs:
           esac
 
       - name: validate the SCP
-        if: needs.resolve.outputs.layer == 'organization'
+        if: needs.resolve.outputs.layer == 'org-structure'
         run: |
           set -euo pipefail
-          terraform -chdir=bootstrap/organization show -json tfplan > bootstrap/organization/plan.json
-          bash scripts/check-policies.sh bootstrap/organization/plan.json policy-out
+          terraform -chdir=bootstrap/org-structure show -json tfplan > bootstrap/org-structure/plan.json
+          bash scripts/check-policies.sh bootstrap/org-structure/plan.json policy-out
 
       - name: summary
         if: always()
@@ -179,7 +169,7 @@ jobs:
             echo '```'
             grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
             echo '```'
-            if [[ "${{ needs.resolve.outputs.layer }}" == "organization" ]]; then
+            if [[ "${{ needs.resolve.outputs.layer }}" == "org-structure" ]]; then
               echo "**Read the full plan in the job log before approving.** Creating"
               echo "an AWS account is effectively permanent: closure takes 90 days and"
               echo "a closed account still counts against the organization quota."

@@ -161,6 +161,24 @@ variable "github_apply_environment" {
   }
 }
 
+variable "email_parameter_prefix" {
+  description = <<-EOT
+    SSM Parameter Store prefix where requested account emails are stored, one per
+    account at `<prefix>/<ACCOUNT_NAME>/email`.
+
+    Seed needs this only to scope the account-request role's write permission. The
+    organization layer reads the parameters. Kept identical in both layers — a mismatch
+    would show up as ParameterNotFound at plan time.
+  EOT
+  type        = string
+  default     = "/eaf/accounts"
+
+  validation {
+    condition     = can(regex("^/[A-Za-z0-9._/-]+[^/]$", var.email_parameter_prefix))
+    error_message = "email_parameter_prefix must start with / and not end with /."
+  }
+}
+
 variable "create_oidc_provider" {
   description = <<-EOT
     Whether to create the GitHub OIDC provider, or reference an existing one.

@@ -312,3 +312,85 @@ resource "aws_iam_role_policy_attachment" "bootstrap_pipeline_admin" {
   role       = aws_iam_role.bootstrap_pipeline.name
   policy_arn = "arn:${local.partition}:iam::aws:policy/AdministratorAccess"
 }
+
+# --------------------------------------------------------------------------
+# ACCOUNT REQUEST ROLE — writes one email parameter, and nothing else.
+# --------------------------------------------------------------------------
+#
+# The request-account workflow needs to store an account's email before the account is
+# created, so it never has to travel through git or a plan artifact.
+#
+# It gets its OWN role rather than reusing either of the others, and both alternatives
+# are worse:
+#
+#   the plan role   is read-only and cannot write a parameter
+#   the apply role  is AdministratorAccess behind an approval gate, so requesting an
+#                   account would require the same approval as creating one, which
+#                   defeats the point of a request step
+#
+# So: a third role, assumable from any branch like the plan role, permitted to write
+# EXACTLY the email parameters and read nothing else. If this role leaks, the worst
+# available action is setting an email on an account that does not exist yet.
+#
+# NOTE it can overwrite an existing parameter. That is a real limitation of a
+# prefix-scoped policy — IAM cannot express "create but never update" for SSM. The
+# protection against changing a live account's email is on the Terraform side:
+# `ignore_changes = [email]`, so an overwritten parameter cannot move an existing
+# account. The workflow also refuses to overwrite.
+data "aws_iam_policy_document" "account_request_trust" {
+  statement {
+    sid     = "GitHubActionsRequestFromAnyBranch"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.github_oidc_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [local.github_sub_any_branch]
+    }
+  }
+}
+
+resource "aws_iam_role" "account_request" {
+  name        = "${var.org_prefix}-account-request-role"
+  description = "GitHub Actions assumes this to store a requested account's email in SSM. Writes ${var.email_parameter_prefix}/* and nothing else."
+
+  assume_role_policy   = data.aws_iam_policy_document.account_request_trust.json
+  max_session_duration = 3600
+}
+
+data "aws_iam_policy_document" "account_request" {
+  statement {
+    sid    = "WriteAccountEmailParametersOnly"
+    effect = "Allow"
+
+    actions = [
+      "ssm:PutParameter",
+      "ssm:GetParameter",
+      "ssm:AddTagsToResource",
+    ]
+
+    # Scoped to the email parameters. Not `parameter/*`, which would be every parameter
+    # in the management account.
+    resources = [
+      "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${var.email_parameter_prefix}/*",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "account_request" {
+  name   = "write-account-emails"
+  role   = aws_iam_role.account_request.id
+  policy = data.aws_iam_policy_document.account_request.json
+}

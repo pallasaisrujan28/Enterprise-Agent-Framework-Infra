@@ -190,15 +190,21 @@ data "aws_iam_policy_document" "workloads_guardrails" {
 
 resource "aws_organizations_policy" "workloads_guardrails" {
   name        = "${var.org_prefix}-workloads-guardrails"
-  description = "Residency, credential and audit guardrails for the ${var.ou_name} OU. Additive to Control Tower's controls."
+  description = "Residency, credential and audit guardrails for the OUs this repository owns. Additive to Control Tower's controls."
   type        = "SERVICE_CONTROL_POLICY"
   content     = data.aws_iam_policy_document.workloads_guardrails.json
 }
 
-# Attached to the OU ONLY. Never to the root, and never to an OU another team owns
-# — an SCP on the root would apply to all 25 accounts in this organization,
-# including client production work.
+# Attached to the OUs THIS REPOSITORY CREATED, and nothing else.
+#
+# Never to the root: an SCP there would apply to all 25 accounts in this organization,
+# including other teams' client and production work. Never to an OU we do not own either
+# — `aws_organizations_organizational_unit.this` only ever contains OUs created from the
+# register, and the protected-name check in ous.tf stops another team's OU getting into
+# that set.
 resource "aws_organizations_policy_attachment" "workloads_guardrails" {
+  for_each = aws_organizations_organizational_unit.this
+
   policy_id = aws_organizations_policy.workloads_guardrails.id
-  target_id = aws_organizations_organizational_unit.workloads.id
+  target_id = each.value.id
 }

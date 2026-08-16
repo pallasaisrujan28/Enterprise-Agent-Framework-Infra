@@ -47,6 +47,23 @@ output "bootstrap_plan_role_arn" {
   value       = aws_iam_role.bootstrap_plan.arn
 }
 
+output "account_request_role_arn" {
+  description = <<-EOT
+    Set as the GitHub Actions repository VARIABLE `AWS_ACCOUNT_REQUEST_ROLE_ARN`.
+
+    Used by the request-account workflow to store a requested account's email in SSM
+    before the account exists. Writes the email parameters and nothing else, so it is
+    safe to expose to any branch — unlike the apply role, which would require the same
+    approval to request an account as to create one.
+  EOT
+  value       = aws_iam_role.account_request.arn
+}
+
+output "email_parameter_prefix" {
+  description = "Where account emails are stored. The organization layer must use the same prefix; a mismatch shows up as ParameterNotFound at plan time."
+  value       = var.email_parameter_prefix
+}
+
 output "management_account_id" {
   description = "Recorded so a later layer can assert it is pointed at the right account."
   value       = local.account_id

@@ -6,6 +6,52 @@ Application code lives in a separate repository.
 New to Terraform? Read [`TERRAFORM-NOTES.md`](TERRAFORM-NOTES.md) first. It is written
 from the mistakes made in this repository, not from documentation.
 
+## Creating an account
+
+One file, `accounts/register.yaml`, holds every account. You never create a new file, and
+you never edit that one by hand.
+
+```
+Actions > request-account > Run workflow
+```
+
+| Field | Example |
+|---|---|
+| account_name | `EAF-DEV` |
+| account_email | `you+eaf-dev@example.com` |
+| ou | `Workloads` |
+| environment | `dev` |
+| project | `enterprise-agent-framework` |
+| cost_centre | `CC-1234` |
+| owner | `platform-team` |
+
+Then:
+
+1. the workflow stores the email in SSM, outside git
+2. appends an entry to `accounts/register.yaml`
+3. opens a pull request
+4. `plan` runs on that branch and should show **1 to add**
+5. you merge
+6. `apply` plans again, pauses, you approve, the account exists
+
+The OU named in `ou:` is created if it does not exist. It cannot be one another team owns
+— `protected_ou_names` fails the plan, and the request script refuses before anything is
+stored.
+
+### Why not edit the YAML directly
+
+Three things the workflow does that hand-editing skips: it validates the name, OU and
+email; it writes the email to SSM so it never enters git history; and it refuses
+duplicates, because an account name cannot be reused. Editing by hand fails the apply with
+`ParameterNotFound`.
+
+### Why a register rather than pipeline inputs
+
+If the account set arrived as a pipeline input, a run supplying only a new account would
+make Terraform plan to **destroy** every account not mentioned in that run. That is what
+makes an account-vending pipeline a one-shot script. `prevent_destroy` turns the mistake
+into an error rather than a disaster, but a file that accumulates is what stops it arising.
+
 ## Manual versus automated
 
 ### Automated — happens without anyone doing anything
@@ -52,7 +98,7 @@ affect another's state.
 | Layer | Runs where | Applied by | Creates |
 |---|---|---|---|
 | `bootstrap/seed` | management account | a human, once, from a laptop | state bucket, GitHub OIDC provider, the two pipeline roles |
-| `bootstrap/organization` | management account | pipeline, gated | `Workloads` OU, guardrail SCP, the member accounts |
+| `bootstrap/org-structure` | management account | pipeline, gated | `Workloads` OU, guardrail SCP, the member accounts |
 
 ### Why seed runs locally
 
@@ -218,7 +264,7 @@ Named after the target, never after the action:
 
 | Environment | Target | Used by |
 |---|---|---|
-| `management` | management account `193027353132` | `bootstrap/seed`, `bootstrap/organization` |
+| `management` | management account `193027353132` | `bootstrap/seed`, `bootstrap/org-structure` |
 | `dev` | `EAF-DEV` | account and workload layers (not built yet) |
 | `prod` | `EAF-PROD` | account and workload layers (not built yet) |
 
@@ -280,8 +326,8 @@ secrets harder to audit.
 | `AWS_MANAGEMENT_ACCOUNT_ID` | `193027353132` |
 | `AWS_PLAN_ROLE_ARN` | `arn:aws:iam::193027353132:role/eaf-bootstrap-plan-role` |
 | `AWS_BOOTSTRAP_ROLE_ARN` | `arn:aws:iam::193027353132:role/eaf-bootstrap-pipeline-role` |
-| `EAF_DEV_ACCOUNT_EMAIL` | a unique address you control |
-| `EAF_PROD_ACCOUNT_EMAIL` | a different unique address |
+| `AWS_ACCOUNT_REQUEST_ROLE_ARN` | `arn:aws:iam::193027353132:role/eaf-account-request-role` |
+| `AWS_EMAIL_PARAMETER_PREFIX` | `/eaf/accounts` |
 
 Get the ARNs from seed:
 

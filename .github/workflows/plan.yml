@@ -1,32 +1,42 @@
-# PLAN. Read-only, runs on every branch, never changes anything.
+# PLAN. Read-only, changes nothing.
 #
-# Uses the PLAN role, which holds ReadOnlyAccess plus permission to write `*.tflock`
-# objects only. A plan needs to take the state lock, which ReadOnlyAccess does not
-# cover — and that failure arrives late, presenting as a state problem rather than a
-# permissions one.
+# NOT ON EVERY FEATURE BRANCH, deliberately. The `apply` workflow plans and then pauses
+# for approval, so that plan IS the review. A second plan on every branch push was
+# duplicated work producing a second artifact nobody read.
 #
-# WHY THIS TRIGGERS ON `push` AND NOT `pull_request`:
+# It runs on:
 #
-# The pull-request token's claim is `repo:<owner>/<repo>:pull_request`, which says
-# nothing about WHICH branch. The push token's claim is
-# `repo:<owner>/<repo>:ref:refs/heads/<branch>`, so the branch is visible in
-# CloudTrail and available to any future narrowing. Results still appear on the pull
-# request, because GitHub attaches check runs to the commit.
+#   main         drift detection. Answers "does AWS still match the code".
+#   request/**   the branches the request-account workflow creates, so an account request
+#                shows its plan on the pull request before anyone merges it.
+#   dispatch     on demand, any branch.
+#
+# Results appear on a pull request because GitHub attaches check runs to the commit, so
+# `request/**` branches get their plan visible in review without needing a
+# `pull_request` trigger. That matters: the pull-request token carries a DIFFERENT `sub`
+# claim, which the plan role does not accept.
+#
+# Uses the PLAN role: ReadOnlyAccess plus permission to write `*.tflock` only. A plan has
+# to take the state lock, which ReadOnlyAccess does not cover, and that failure arrives
+# late and looks like a state problem rather than a permissions one.
 
 name: plan
 
 on:
   push:
-    branches: ["**"]
+    branches:
+      - main
+      - "request/**"
     paths:
       - "bootstrap/**"
+      - "accounts/**"
       - "scripts/**"
       - ".github/workflows/plan.yml"
   workflow_dispatch:
 
 permissions:
-  # Required to get an OIDC token at all. Without it the credentials step fails with
-  # a message that does not mention permissions.
+  # Required to get an OIDC token at all. Without it the credentials step fails with a
+  # message that does not mention permissions.
   id-token: write
   contents: read
 
@@ -48,6 +58,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          # No wrapper. It rewrites stdout, which breaks anything that greps the output.
           terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@v4
@@ -75,10 +86,9 @@ jobs:
             -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
             | tee plan.txt
 
-          # Fail if the summary line is absent rather than assume no changes.
-          # Terraform colorizes even into a pipe, so -no-color above is what makes
-          # this grep able to match at all. A check that silently matches nothing is
-          # worse than no check.
+          # Fail if the summary line is absent rather than assume no changes. Terraform
+          # colorizes even into a pipe, so -no-color above is what makes this grep able to
+          # match at all. A check that silently matches nothing is worse than no check.
           if ! grep -qE '^(Plan: |No changes)' plan.txt; then
             echo "no plan summary found - do not trust this run" >&2
             exit 1
@@ -112,21 +122,16 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-plan-org-${{ github.run_id }}
 
-      - name: build the accounts variable
-        env:
-          EAF_DEV_ACCOUNT_EMAIL: ${{ vars.EAF_DEV_ACCOUNT_EMAIL }}
-          EAF_PROD_ACCOUNT_EMAIL: ${{ vars.EAF_PROD_ACCOUNT_EMAIL }}
-        run: bash scripts/write-accounts-tfvars.sh bootstrap/organization/accounts.tfvars.json
-
+      # No email plumbing here any more. The account set comes from
+      # accounts/register.yaml and the addresses come from SSM, both read by Terraform.
       - name: plan
-        working-directory: bootstrap/organization
+        working-directory: bootstrap/org-structure
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
           terraform plan -no-color -input=false -lock-timeout=5m \
             -out=tfplan \
             -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
-            -var-file=accounts.tfvars.json \
             | tee plan.txt
 
           if ! grep -qE '^(Plan: |No changes)' plan.txt; then
@@ -136,35 +141,23 @@ jobs:
 
           terraform show -json tfplan > plan.json
 
-      # Runs here rather than in the credential-free `checks` workflow because it
-      # needs both real AWS (Access Analyzer) and a resolved plan. Static checks
-      # cannot catch a nonexistent IAM action, and an unknown action inside a Deny
-      # denies nothing while reading as a guardrail.
+      # Runs here rather than in the credential-free `checks` workflow because it needs
+      # both real AWS (Access Analyzer) and a resolved plan. Static checks cannot catch a
+      # nonexistent IAM action, and an unknown action inside a Deny denies nothing while
+      # reading as a guardrail.
       - name: validate the SCP
-        run: bash scripts/check-policies.sh bootstrap/organization/plan.json policy-out
+        run: bash scripts/check-policies.sh bootstrap/org-structure/plan.json policy-out
 
       - name: summary
         if: always()
-        working-directory: bootstrap/organization
+        working-directory: bootstrap/org-structure
         run: |
           {
             echo "### organization"
             echo '```'
             grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
             echo '```'
-            echo "Account creation is effectively permanent: closure takes 90 days"
-            echo "and closed accounts still count against the org quota. Read the"
-            echo "full plan in the job log before approving an apply."
+            echo "Account creation is effectively permanent: closure takes 90 days and a"
+            echo "closed account still counts against the org quota. Read the full plan in"
+            echo "the job log before approving an apply."
           } >> "$GITHUB_STEP_SUMMARY"
-
-      # The plan is what the apply job consumes, so the reviewer approves something
-      # that has already been produced and printed rather than a plan generated after
-      # approval.
-      - uses: actions/upload-artifact@v4
-        if: success()
-        with:
-          name: organization-plan-${{ github.sha }}
-          path: |
-            bootstrap/organization/tfplan
-            bootstrap/organization/plan.txt
-          retention-days: 5

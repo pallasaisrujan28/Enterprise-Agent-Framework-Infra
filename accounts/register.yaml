@@ -1,0 +1,72 @@
+# THE ACCOUNT REGISTER — the input layer.
+#
+# One entry per AWS account this repository manages. This file decides WHICH accounts
+# exist and WHICH OU each one lives in. Its git history is the audit trail: who asked for
+# each account, when, and who approved the pull request.
+#
+# IT STARTS EMPTY, ON PURPOSE.
+#
+# Every account goes through the request workflow, including the first two. Seeding
+# entries by hand would skip the validation and the email storage, and would mean the
+# path we rely on forever had never actually been exercised.
+#
+# DO NOT EDIT BY HAND:
+#
+#   Actions > request-account > Run workflow
+#
+# It validates the input, stores the email outside git, appends an entry here, and opens a
+# pull request. Editing directly skips all three, and the apply then fails with
+# ParameterNotFound naming the missing SSM parameter.
+#
+# THERE IS NO EMAIL IN THIS FILE, DELIBERATELY.
+#
+# An account's email becomes its root user and its only recovery address. It is personal
+# data and it is permanent — AWS has no API to change it — so it is kept out of git
+# history entirely. The request workflow writes it to SSM Parameter Store in the
+# management account at `/eaf/accounts/<NAME>/email`, and Terraform only reads it.
+#
+# REMOVING AN ENTRY DOES NOT CLOSE AN ACCOUNT.
+#
+# `prevent_destroy` and `close_on_deletion = false` are set on the resource, so deleting a
+# line here makes Terraform error rather than destroy. Closing an account is a console
+# operation with a 90-day consequence, and a closed account still counts against the
+# organization quota.
+#
+# WHILE THIS FILE IS EMPTY there are no accounts and no OUs, because OUs are derived from
+# the `ou:` values below. An OU with no accounts in it does nothing, so that is correct
+# rather than a gap.
+#
+# FIELDS, all set by the workflow:
+#
+#   ou            Which OU the account lives in. CREATED IF IT DOES NOT EXIST. Determines
+#                 which SCPs apply, because policies attach to the OU and every account
+#                 inside inherits them. Must not name an OU another team owns — see
+#                 protected_ou_names in bootstrap/org-structure/variables.tf.
+#   environment   dev | test | staging | prod
+#   project       Which project owns the account
+#   cost_centre   For billing allocation, so Cost Explorer can group by it
+#   owner         A person or a team. Who gets asked about the bill.
+#   requested     Date, set automatically
+#   ticket        Change reference, optional
+#   description   One line, optional
+#
+# An entry looks like this:
+#
+#   EAF-DEV:
+#     ou: Workloads
+#     environment: dev
+#     project: enterprise-agent-framework
+#     cost_centre: CC-1234
+#     owner: platform-team
+#     requested: "2026-08-14"
+#     ticket: EAF-12
+#     description: Development account for the agent platform.
+
+# An explicit empty mapping, so this file is valid YAML while no accounts exist.
+#
+# Required: Terraform's `yamldecode` FAILS on a comments-only file with "missing start of
+# document" rather than returning an empty value. Found by running validate against an
+# empty register, not by reasoning about it.
+#
+# The first request-account run replaces this line with a real entry.
+{}

@@ -7,7 +7,7 @@
 # CI does not use this Makefile's AWS targets — the workflows call the same scripts
 # directly with OIDC credentials.
 
-LAYERS      := bootstrap/seed bootstrap/organization
+LAYERS      := bootstrap/seed bootstrap/org-structure
 TF_VERSION  := 1.13.3
 ACCOUNT_ID  := 193027353132
 
@@ -60,8 +60,8 @@ plan-seed:
 # Emails come from the environment, same as CI. Unset values fail with an explanation
 # rather than reaching Terraform as empty strings.
 plan-org:
-	bash scripts/write-accounts-tfvars.sh bootstrap/organization/accounts.tfvars.json
-	cd bootstrap/organization && \
+	bash scripts/write-accounts-tfvars.sh bootstrap/org-structure/accounts.tfvars.json
+	cd bootstrap/org-structure && \
 	terraform init -input=false -no-color -backend-config=backend.hcl && \
 	terraform plan -no-color -input=false -out=tfplan \
 	  -var="management_account_id=$(ACCOUNT_ID)" \
@@ -69,7 +69,7 @@ plan-org:
 	terraform show -json tfplan > plan.json
 
 policy-check: plan-org
-	bash scripts/check-policies.sh bootstrap/organization/plan.json policy-out
+	bash scripts/check-policies.sh bootstrap/org-structure/plan.json policy-out
 
 clean:
 	rm -rf policy-out
