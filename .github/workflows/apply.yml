@@ -47,15 +47,16 @@
 name: apply
 
 on:
-  # Merging to main is the normal trigger. The approval gate is still in the way, so
-  # "merged" and "applied" remain separate events — but nobody has to remember to
-  # dispatch a workflow by hand for a routine change.
-  push:
-    branches: [main]
-    paths:
-      - "bootstrap/org-structure/**"
-      - "accounts/**"
-      - "scripts/**"
+  # Push-to-main auto-trigger is intentionally disabled until EAF-DEV and EAF-PROD
+  # accounts exist and the per-account baseline layer is built. Re-enable by
+  # uncommenting the push block below once those layers are ready.
+  #
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "bootstrap/org-structure/**"
+  #     - "accounts/**"
+  #     - "scripts/**"
 
   # Manual dispatch stays for the seed layer, and for re-running an apply without a
   # new commit. It takes NO email inputs any more: the account set comes from
