@@ -4,6 +4,11 @@
 # nothing to configure. `terraform init -backend=false` skips the S3 backend, which
 # is what makes validate possible without touching AWS.
 #
+# Jobs:
+#   static          terraform fmt + validate across all modules
+#   tflint          linting
+#   validate-register  accounts/register.yaml schema check (no credentials needed)
+#
 # What this CANNOT catch: anything that depends on real values. A nonexistent IAM
 # action, a wrong Control Tower baseline version, a policy that is too long. Those
 # need the plan workflow.
@@ -70,3 +75,17 @@ jobs:
           # --recursive walks every directory. Without it tflint checks only the
           # root and reports clean while never having looked at bootstrap/.
           tflint --recursive --format compact
+
+  validate-register:
+    name: validate register
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: validate accounts/register.yaml
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          # scripts/validate_register.py is the single source of truth for what a
+          # valid register entry looks like. Add new rules there, not here.
+          python3 scripts/validate_register.py accounts/register.yaml
