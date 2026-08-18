@@ -1,20 +1,25 @@
 # PLAN. Read-only, changes nothing.
 #
-# NOT ON EVERY FEATURE BRANCH, deliberately. The `apply` workflow plans and then pauses
-# for approval, so that plan IS the review. A second plan on every branch push was
-# duplicated work producing a second artifact nobody read.
+# Runs on ANY branch that touches bootstrap/**, accounts/**, or scripts/**. The path
+# filter is the control — not the branch name.
+#
+# Why any branch: the pipeline is a shared account vending service. Any team opens a
+# feature branch, adds an entry to accounts/register.yaml, and needs to see the plan
+# before their PR is reviewed. Restricting to request/** would mean only accounts
+# requested via the old form-based workflow got a plan; direct YAML edits would merge
+# blind.
 #
 # It runs on:
 #
+#   any branch   when bootstrap/**, accounts/**, or scripts/** changes — plan visible
+#                in the PR before anyone merges it.
 #   main         drift detection. Answers "does AWS still match the code".
-#   request/**   the branches the request-account workflow creates, so an account request
-#                shows its plan on the pull request before anyone merges it.
 #   dispatch     on demand, any branch.
 #
-# Results appear on a pull request because GitHub attaches check runs to the commit, so
-# `request/**` branches get their plan visible in review without needing a
-# `pull_request` trigger. That matters: the pull-request token carries a DIFFERENT `sub`
-# claim, which the plan role does not accept.
+# Results appear on a pull request because GitHub attaches check runs to the commit,
+# so any feature branch gets its plan visible in review without needing a
+# `pull_request` trigger. That matters: the pull-request token carries a DIFFERENT
+# `sub` claim, which the plan role does not accept.
 #
 # Uses the PLAN role: ReadOnlyAccess plus permission to write `*.tflock` only. A plan has
 # to take the state lock, which ReadOnlyAccess does not cover, and that failure arrives
@@ -24,9 +29,7 @@ name: plan
 
 on:
   push:
-    branches:
-      - main
-      - "request/**"
+    branches: ["**"]
     paths:
       - "bootstrap/**"
       - "accounts/**"
