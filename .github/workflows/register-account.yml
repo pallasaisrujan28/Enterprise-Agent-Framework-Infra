@@ -1,0 +1,199 @@
+# REGISTER ACCOUNT — step 1 of requesting a new AWS account.
+#
+# Fill this form once per account. It stores the root email in AWS SSM
+# Parameter Store so it never enters git history. After this runs:
+#
+#   1. Create a feature branch
+#   2. Add an entry to accounts/register.yaml  (see the file for the format)
+#   3. Open a pull request to main
+#      CI validates the YAML and shows the Terraform plan on the PR
+#   4. Reviewer merges — apply creates the account (manual dispatch for now)
+#
+# WHY THE EMAIL IS STORED HERE AND NOT IN THE YAML:
+#
+# An account's email becomes its root user and its only recovery address.
+# AWS has no API to change it after creation. Storing it in git would make
+# it permanent in history, visible in diffs, and hard to rotate later.
+# SSM keeps it out of git entirely.
+
+name: register-account
+
+on:
+  workflow_dispatch:
+    inputs:
+      account_name:
+        description: "Account name — letters, digits and hyphens, max 50 chars. Cannot be changed after creation."
+        required: true
+        type: string
+      account_email:
+        description: "Root email — globally unique across all of AWS. Cannot be changed after creation."
+        required: true
+        type: string
+      ou:
+        description: "Which OU the account lives in. Created if it does not exist."
+        required: true
+        default: Workloads
+        type: string
+      environment:
+        description: "Environment label"
+        required: true
+        type: choice
+        options: [dev, test, staging, prod]
+      project:
+        description: "Project this account belongs to"
+        required: true
+        type: string
+      cost_centre:
+        description: "Cost centre for billing allocation"
+        required: true
+        default: TBC
+        type: string
+      owner:
+        description: "Who owns this account — a person or a team"
+        required: true
+        type: string
+      ticket:
+        description: "Ticket or change reference (optional)"
+        required: false
+        type: string
+      description:
+        description: "One line describing what this account is for (optional)"
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+
+    env:
+      NAME:    ${{ inputs.account_name }}
+      EMAIL:   ${{ inputs.account_email }}
+      PREFIX:  ${{ vars.AWS_EMAIL_PARAMETER_PREFIX }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: validate inputs
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$EMAIL" | grep -qE '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; then
+            echo "ERROR: not a valid email address" >&2; exit 1
+          fi
+
+          if ! printf '%s' "$NAME" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]{0,49}$'; then
+            echo "ERROR: account name must be letters, digits and hyphens, max 50 chars" >&2
+            exit 1
+          fi
+
+          if [[ -z "$PREFIX" ]]; then
+            echo "ERROR: AWS_EMAIL_PARAMETER_PREFIX repository variable is not set" >&2
+            exit 1
+          fi
+
+          # Validate the YAML entry that will go in the register, before anything is stored.
+          pip install --quiet pyyaml
+          python3 - <<'PYEOF'
+          import sys, yaml, re
+
+          VALID_ENVIRONMENTS = {"dev", "test", "staging", "prod"}
+          PROTECTED_OUS      = {"Sandbox", "Security", "MLOps", "Apps", "Sprint BE", "Clients"}
+          OU_PATTERN         = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 -]{0,127}$")
+
+          import os
+          errors = []
+          env = os.environ.get("INPUT_ENVIRONMENT", "${{ inputs.environment }}")
+          ou  = os.environ.get("INPUT_OU",          "${{ inputs.ou }}")
+
+          if env not in VALID_ENVIRONMENTS:
+              errors.append(f"environment '{env}' is invalid")
+          if not OU_PATTERN.match(ou):
+              errors.append(f"OU name '{ou}' is invalid")
+          if ou in PROTECTED_OUS:
+              errors.append(f"OU '{ou}' belongs to another team")
+
+          for e in errors:
+              print(f"ERROR: {e}", file=sys.stderr)
+          sys.exit(len(errors))
+          PYEOF
+
+          echo "inputs valid"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ACCOUNT_REQUEST_ROLE_ARN }}
+          aws-region:     ${{ vars.AWS_REGION }}
+          role-session-name: eaf-register-${{ github.run_id }}
+
+      - name: store email in SSM
+        run: |
+          set -euo pipefail
+          param="${PREFIX}/${NAME}/email"
+
+          # Refuse to overwrite. An existing parameter means the account either
+          # exists or was already requested. AWS cannot change an account's email
+          # afterwards — overwriting would leave the parameter and the real account
+          # disagreeing.
+          if aws ssm get-parameter --name "$param" >/dev/null 2>&1; then
+            echo "ERROR: $param already exists. Refusing to overwrite." >&2
+            echo "An account email cannot be changed after creation." >&2
+            exit 1
+          fi
+
+          aws ssm put-parameter \
+            --name  "$param" \
+            --type  String \
+            --value "$EMAIL" \
+            --description "Root email for ${NAME}. Registered by ${{ github.actor }}, run ${{ github.run_id }}." \
+            --tags "Key=ManagedBy,Value=github-actions" "Key=Account,Value=${NAME}" \
+            > /dev/null
+
+          echo "stored $param  (value not printed)"
+
+      - name: next steps
+        if: always()
+        run: |
+          {
+            echo "## Account \`${{ inputs.account_name }}\` registered"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| name | \`${{ inputs.account_name }}\` |"
+            echo "| ou | ${{ inputs.ou }} |"
+            echo "| environment | ${{ inputs.environment }} |"
+            echo "| project | ${{ inputs.project }} |"
+            echo "| cost centre | ${{ inputs.cost_centre }} |"
+            echo "| owner | ${{ inputs.owner }} |"
+            echo ""
+            echo "Email stored in SSM at \`${{ vars.AWS_EMAIL_PARAMETER_PREFIX }}/${{ inputs.account_name }}/email\`"
+            echo ""
+            echo "### What to do next"
+            echo ""
+            echo "1. Create a feature branch"
+            echo "2. Add this entry to \`accounts/register.yaml\`:"
+            echo ""
+            echo '```yaml'
+            echo "${{ inputs.account_name }}:"
+            echo "  ou: ${{ inputs.ou }}"
+            echo "  environment: ${{ inputs.environment }}"
+            echo "  project: ${{ inputs.project }}"
+            echo "  cost_centre: ${{ inputs.cost_centre }}"
+            echo "  owner: ${{ inputs.owner }}"
+            requested=$(date -u +%Y-%m-%d)
+            echo "  requested: \"$requested\""
+            if [[ -n "${{ inputs.ticket }}" ]]; then
+              echo "  ticket: ${{ inputs.ticket }}"
+            fi
+            if [[ -n "${{ inputs.description }}" ]]; then
+              echo "  description: ${{ inputs.description }}"
+            fi
+            echo '```'
+            echo ""
+            echo "3. Open a pull request to \`main\`"
+            echo "   CI will validate the YAML and show the Terraform plan."
+            echo "4. After the PR is reviewed and merged, run the **apply** workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
