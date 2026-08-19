@@ -1,3 +1,9 @@
-# REPLACED by ci.yml — this file has no trigger and will never run.
-# Terraform plan is now the plan job inside ci.yml, triggered automatically
-# when bootstrap/**, accounts/**, or scripts/** files change.
+name: deprecated
+on:
+  workflow_dispatch:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - run: echo "deprecated"
