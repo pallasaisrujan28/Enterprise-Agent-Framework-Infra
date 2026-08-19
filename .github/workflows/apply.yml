@@ -1,75 +1,39 @@
-# APPLY. Merge to main, or manual dispatch. Always gated on a human approval.
+# APPLY — creates and updates AWS resources.
 #
-# TWO PHASES, AND THE ORDER IS THE POINT.
+# Always two phases:
+#   plan    read-only role, no gate — prints exactly what will change
+#   apply   admin role, behind an approval gate — applies THAT saved plan
 #
-#   plan   - read-only role, no gate. Produces and PRINTS the plan.
-#   apply  - admin role, behind the approval gate. Applies THAT SAVED PLAN.
+# The reviewer approves the plan they can read, not one generated afterwards.
 #
-# The reviewer therefore approves a plan they can read. A single job would ask for
-# approval first and generate the plan afterwards, so the approval would be for
-# something nobody had seen.
+# Targets:
+#   accounts       OUs, guardrail SCPs, and AWS accounts  (the common case)
+#   infrastructure IAM roles and pipeline foundation       (rare — only when
+#                  bootstrap/seed Terraform changes)
 #
-# WHY THE APPROVAL IS THE CONTROL RATHER THAN THE BRANCH:
-#
-# The apply role's trust policy accepts exactly one `sub` claim:
-#
-#   repo:<owner>/<repo>:environment:management
-#
-# GitHub only writes an environment claim when the job really ran in that
-# Environment. Where the Environment requires reviewers, the claim is evidence a
-# human approved THIS run. Branch protection cannot prove that; it proves code
-# reached main.
-#
-# ONE-TIME SETUP, which Terraform is not doing here (see github_apply_environment in
-# bootstrap/seed/variables.tf):
-#
-#   Settings > Environments > New environment > management
-#     Required reviewers:    at least one person
-#     Deployment branches:   Selected branches -> main
-#
-# Until reviewers are configured the Environment exists but approves nothing. AWS can
-# only check the Environment's NAME, not that anyone clicked approve.
-#
-# NOTE ON THE BOOTSTRAP LAYERS AND BRANCHES: these layers have exactly one target,
-# the management account, and one state file each. So there is no dev copy to apply a
-# branch into, and no branch-per-environment split. That model starts at the
-# accounts/ and workloads/ layers, once EAF-DEV and EAF-PROD exist.
-#
-# HOW AN ACCOUNT GETS CREATED, end to end:
-#
-#   request-account workflow  stores the email in SSM, appends to the register,
-#                             opens a pull request
-#   plan on request/**        shows one account to add
-#   merge to main             triggers this workflow
-#   approval                  a human reads the plan and approves
-#   apply                     the account exists; the register output records it
+# The push-to-main auto-trigger is commented out until the per-account
+# baseline layer is built. Re-enable by uncommenting the push block below.
 
 name: apply
 
 on:
-  # Merging to main is the normal trigger. The approval gate is still in the way, so
-  # "merged" and "applied" remain separate events — but nobody has to remember to
-  # dispatch a workflow by hand for a routine change.
-  push:
-    branches: [main]
-    paths:
-      - "bootstrap/org-structure/**"
-      - "accounts/**"
-      - "scripts/**"
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "bootstrap/org-structure/**"
+  #     - "accounts/**"
+  #     - "scripts/**"
 
-  # Manual dispatch stays for the seed layer, and for re-running an apply without a
-  # new commit. It takes NO email inputs any more: the account set comes from
-  # accounts/register.yaml and the addresses from SSM, both read by Terraform. That is
-  # what makes this pipeline re-runnable rather than one-shot.
   workflow_dispatch:
     inputs:
-      layer:
-        description: "Which bootstrap layer to apply"
+      target:
+        description: "What to apply"
         required: true
         type: choice
+        default: accounts
         options:
-          - org-structure
-          - seed
+          - accounts        # applies bootstrap/org-structure: OUs, SCPs, accounts
+          - infrastructure  # applies bootstrap/seed: IAM roles, OIDC, state bucket
       confirm:
         description: 'Type "apply" to confirm'
         required: true
@@ -84,31 +48,33 @@ env:
   TF_IN_AUTOMATION: "true"
 
 jobs:
-  # Resolves the layer once, so nothing downstream has to cope with `inputs.layer`
-  # being empty on a push. A job output rather than a workflow-level `env`, because
-  # `env` is not available in a job-level `if:`.
+  # Resolve the target once so downstream jobs don't need to handle empty inputs.
   resolve:
     runs-on: ubuntu-latest
     outputs:
       layer: ${{ steps.pick.outputs.layer }}
     steps:
-      - name: pick the layer and check the confirmation
+      - name: resolve target to layer
         id: pick
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             if [[ "${{ inputs.confirm }}" != "apply" ]]; then
-              echo "confirmation was not the word apply - stopping" >&2
+              echo "type the word apply in the confirm field to proceed" >&2
               exit 1
             fi
-            layer="${{ inputs.layer }}"
+            case "${{ inputs.target }}" in
+              accounts)       layer="org-structure" ;;
+              infrastructure) layer="seed"          ;;
+              *)
+                echo "unknown target: ${{ inputs.target }}" >&2; exit 1 ;;
+            esac
           else
-            # A push to main only ever applies the org-structure layer. Seed runs from
-            # a laptop and must not be applied by a merge.
+            # Push trigger: always apply the accounts layer.
             layer="org-structure"
           fi
           echo "layer=$layer" >> "$GITHUB_OUTPUT"
-          echo "layer: $layer"
+          echo "applying: $layer"
 
   plan:
     name: plan
@@ -130,6 +96,14 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-preapply-plan-${{ github.run_id }}
 
+      - name: verify account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2; exit 1
+          fi
+
       - name: plan
         id: plan
         working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
@@ -137,15 +111,17 @@ jobs:
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
 
-          args=(-no-color -input=false -lock-timeout=5m -out=tfplan
-                -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}")
-          # -detailed-exitcode: 0 no changes, 1 error, 2 changes present. Used so the
-          # apply job is skipped when there is nothing to do, rather than asking a
-          # human to approve a no-op.
           set +e
-          terraform plan "${args[@]}" -detailed-exitcode | tee plan.txt
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -out=tfplan \
+            -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
+            | tee plan.txt
           code=${PIPESTATUS[0]}
           set -e
+
+          if ! grep -qE '^(Plan: |No changes)' plan.txt; then
+            echo "no plan summary found — do not trust this run" >&2; exit 1
+          fi
 
           case "$code" in
             0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
@@ -153,11 +129,11 @@ jobs:
             *) echo "plan failed with exit code $code" >&2; exit "$code" ;;
           esac
 
-      - name: validate the SCP
+      - name: validate SCP
         if: needs.resolve.outputs.layer == 'org-structure'
         run: |
-          set -euo pipefail
-          terraform -chdir=bootstrap/org-structure show -json tfplan > bootstrap/org-structure/plan.json
+          terraform -chdir=bootstrap/org-structure show -json \
+            bootstrap/org-structure/tfplan > bootstrap/org-structure/plan.json
           bash scripts/check-policies.sh bootstrap/org-structure/plan.json policy-out
 
       - name: summary
@@ -165,14 +141,14 @@ jobs:
         working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
         run: |
           {
-            echo "## ${{ needs.resolve.outputs.layer }} - awaiting approval"
+            echo "## ${{ inputs.target || 'accounts' }} — awaiting approval"
             echo '```'
             grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
             echo '```'
             if [[ "${{ needs.resolve.outputs.layer }}" == "org-structure" ]]; then
-              echo "**Read the full plan in the job log before approving.** Creating"
-              echo "an AWS account is effectively permanent: closure takes 90 days and"
-              echo "a closed account still counts against the organization quota."
+              echo "**Read the full plan in the job log before approving.**"
+              echo "Creating an AWS account is effectively permanent: closure takes"
+              echo "90 days and a closed account still counts against the org quota."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -189,15 +165,7 @@ jobs:
     needs: [resolve, plan]
     if: needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
-
-    # THE GATE. This single line is what rewrites the `sub` claim to the environment
-    # form, which is the only claim the admin role accepts. Remove it and the apply
-    # role becomes unassumable — and the failure is AccessDenied, which does not
-    # mention approval at all.
-    environment: ${{ vars.AWS_APPLY_ENVIRONMENT || 'management' }}
-
-    # Not at workflow level, because a cancelled apply can leave state locked and
-    # resources half-created. For account creation that is unrecoverable.
+    environment: management
     concurrency:
       group: apply-${{ needs.resolve.outputs.layer }}
       cancel-in-progress: false
@@ -221,38 +189,26 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-apply-${{ github.run_id }}
 
-      - name: verify the account
+      - name: verify account
         run: |
           set -euo pipefail
           actual=$(aws sts get-caller-identity --query Account --output text)
           if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
-            echo "refusing: credentials resolve to $actual" >&2
-            exit 1
+            echo "refusing: credentials resolve to $actual" >&2; exit 1
           fi
-          echo "account $actual"
 
-      - name: apply the saved plan
+      - name: apply
         working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
-
-          # Applying the SAVED plan, not re-planning. Terraform refuses if state moved
-          # since the plan was made ("Saved plan is stale"), which is what we want: it
-          # means the plan the reviewer read is no longer what would happen.
-          #
-          # Seen once in this project: that error appeared AFTER the apply had already
-          # landed and written state. Cause never determined. So on a stale-plan error,
-          # verify the real end state with `terraform plan` before re-running anything.
-          #
-          # No -auto-approve. A saved plan file is already the approval.
           terraform apply -no-color -input=false -lock-timeout=5m tfplan
 
       - name: outputs
         working-directory: bootstrap/${{ needs.resolve.outputs.layer }}
         run: |
           {
-            echo "## ${{ needs.resolve.outputs.layer }} applied"
+            echo "## ${{ inputs.target || 'accounts' }} applied"
             echo '```'
             terraform output -no-color
             echo '```'
@@ -265,7 +221,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          {
-            echo "### ${{ needs.resolve.outputs.layer }}: no changes"
-            echo "Plan reported no differences, so no approval was requested."
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "### ${{ inputs.target || 'accounts' }}: no changes" >> "$GITHUB_STEP_SUMMARY"
+          echo "Plan reported no differences." >> "$GITHUB_STEP_SUMMARY"
