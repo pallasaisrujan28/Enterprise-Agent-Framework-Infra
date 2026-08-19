@@ -1,3 +1,9 @@
-# REPLACED by ci.yml — this file has no trigger and will never run.
-# Static checks (fmt, validate, tflint, register validation) are now
-# in the validate job inside ci.yml.
+name: deprecated
+on:
+  workflow_dispatch:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - run: echo "deprecated"
