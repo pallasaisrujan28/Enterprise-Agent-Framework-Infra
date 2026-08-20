@@ -9,9 +9,9 @@
 module "baseline" {
   source = "../../modules/account-baseline"
 
-  account_name  = "EAF-DEV"
-  environment   = "dev"
-  region        = var.region
+  account_name = "EAF-DEV"
+  environment  = "dev"
+  region       = var.region
 
   # Workload CI: the repository whose GitHub Actions can deploy to this account.
   # Update this when the application repository is known.

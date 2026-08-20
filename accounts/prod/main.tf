@@ -9,9 +9,9 @@
 module "baseline" {
   source = "../../modules/account-baseline"
 
-  account_name  = "EAF-PROD"
-  environment   = "prod"
-  region        = var.region
+  account_name = "EAF-PROD"
+  environment  = "prod"
+  region       = var.region
 
   github_repository          = "pallasaisrujan28/Enterprise-Agent-Framework-Infra"
   github_repository_owner_id = "194785418"

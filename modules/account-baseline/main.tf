@@ -25,8 +25,8 @@ locals {
   partition  = data.aws_partition.this.partition
 
   # Immutable OIDC subject prefix — same format as bootstrap/seed/iam.tf.
-  repo_owner = split("/", var.github_repository)[0]
-  repo_name  = split("/", var.github_repository)[1]
+  repo_owner            = split("/", var.github_repository)[0]
+  repo_name             = split("/", var.github_repository)[1]
   github_sub_any_branch = "repo:${local.repo_owner}@${var.github_repository_owner_id}/${local.repo_name}@${var.github_repository_id}:ref:refs/heads/*"
 }
 
@@ -53,7 +53,7 @@ resource "aws_guardduty_detector" "this" {
 resource "aws_securityhub_account" "this" {
   # auto_enable_controls = true so new controls in the standard are enabled
   # automatically rather than requiring a manual opt-in each time AWS adds one.
-  auto_enable_controls = true
+  auto_enable_controls     = true
   enable_default_standards = false
 }
 
