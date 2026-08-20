@@ -19,3 +19,13 @@ EAF-DEV:
   project: enterprise-agent-framework
   requested: "2026-08-19"
   ticket: EAF-1
+
+EAF-PROD:
+  cost_centre: CC-1002
+  description: Production account for the Enterprise Agent Framework platform
+  environment: prod
+  ou: Workloads
+  owner: platform-team
+  project: enterprise-agent-framework
+  requested: "2026-08-20"
+  ticket: EAF-2
