@@ -85,7 +85,7 @@ jobs:
           set +e
           terraform plan -no-color -input=false -lock-timeout=5m \
             -out=tfplan \
-            -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
+            \
             -detailed-exitcode \
             | tee plan.txt
           code=${PIPESTATUS[0]}

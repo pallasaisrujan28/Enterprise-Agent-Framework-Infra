@@ -1,3 +1,13 @@
+terraform {
+  required_version = ">= 1.11"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
 # PER-ACCOUNT BASELINE
 #
 # Runs inside each member account via OrganizationAccountAccessRole.
@@ -46,6 +56,11 @@ resource "aws_guardduty_detector" "this" {
     s3_logs {
       enable = true
     }
+  }
+
+  tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }
 
