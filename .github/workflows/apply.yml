@@ -133,7 +133,7 @@ jobs:
         if: needs.resolve.outputs.layer == 'org-structure'
         run: |
           terraform -chdir=bootstrap/org-structure show -json \
-            bootstrap/org-structure/tfplan > bootstrap/org-structure/plan.json
+            tfplan > bootstrap/org-structure/plan.json
           bash scripts/check-policies.sh bootstrap/org-structure/plan.json policy-out
 
       - name: summary
