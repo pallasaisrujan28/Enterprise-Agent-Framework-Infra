@@ -394,3 +394,28 @@ resource "aws_iam_role_policy" "account_request" {
   role   = aws_iam_role.account_request.id
   policy = data.aws_iam_policy_document.account_request.json
 }
+# Control Tower read permissions for the plan role.
+#
+# ReadOnlyAccess does not include newer Control Tower Baselines API actions.
+# Once a CT baseline exists in state, Terraform refreshes it on every plan —
+# which calls GetEnabledBaseline. Without this, the second account's plan fails
+# with AccessDenied even though the first account's plan succeeded (no baseline
+# in state yet to refresh).
+data "aws_iam_policy_document" "bootstrap_plan_controltower" {
+  statement {
+    sid    = "ControlTowerRead"
+    effect = "Allow"
+    actions = [
+      "controltower:Get*",
+      "controltower:List*",
+      "controltower:Describe*",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "bootstrap_plan_controltower" {
+  name   = "controltower-read"
+  role   = aws_iam_role.bootstrap_plan.id
+  policy = data.aws_iam_policy_document.bootstrap_plan_controltower.json
+}
