@@ -406,12 +406,9 @@ data "aws_iam_policy_document" "bootstrap_plan_controltower" {
     sid    = "ControlTowerRead"
     effect = "Allow"
     actions = [
-      "controltower:GetEnabledBaseline",
-      "controltower:ListEnabledBaselines",
-      "controltower:GetBaseline",
-      "controltower:ListBaselines",
-      "controltower:GetEnabledControl",
-      "controltower:ListEnabledControls",
+      "controltower:Get*",
+      "controltower:List*",
+      "controltower:Describe*",
     ]
     resources = ["*"]
   }
