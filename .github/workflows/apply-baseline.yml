@@ -85,7 +85,6 @@ jobs:
           set +e
           terraform plan -no-color -input=false -lock-timeout=5m \
             -out=tfplan \
-            \
             -detailed-exitcode \
             | tee plan.txt
           code=${PIPESTATUS[0]}
@@ -143,7 +142,7 @@ jobs:
           path: accounts/dev
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-baseline-apply-dev-${{ github.run_id }}
       - name: apply
@@ -185,7 +184,7 @@ jobs:
           path: accounts/prod
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_BASELINE_PROD_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-baseline-apply-prod-${{ github.run_id }}
       - name: apply

@@ -445,3 +445,117 @@ resource "aws_iam_role_policy" "bootstrap_plan_controltower" {
   role   = aws_iam_role.bootstrap_plan.id
   policy = data.aws_iam_policy_document.bootstrap_plan_controltower.json
 }
+
+# --------------------------------------------------------------------------
+# BASELINE DEPLOY ROLES — one per environment (dev, prod)
+# --------------------------------------------------------------------------
+#
+# The apply-baseline workflow uses these roles to apply the per-account
+# baseline inside EAF-DEV and EAF-PROD. Each role:
+#   - trusts only its own GitHub Environment (dev or prod)
+#   - can only assume OrganizationAccountAccessRole in member accounts
+#   - has no permissions in the management account
+#
+# GitHub Environments handle the approval gate:
+#   dev   no reviewers configured → applies automatically
+#   prod  reviewer required       → applies after approval
+#
+# The wildcard on resources is necessary because member account IDs are
+# created by the org-structure layer (which runs after seed). They are not
+# known when this policy is written.
+
+locals {
+  github_sub_baseline_dev  = "${local.github_sub_prefix}:environment:dev"
+  github_sub_baseline_prod = "${local.github_sub_prefix}:environment:prod"
+}
+
+# ── dev baseline role ─────────────────────────────────────────────────────
+data "aws_iam_policy_document" "baseline_dev_trust" {
+  statement {
+    sid     = "GitHubActionsDevEnvironment"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.github_oidc_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [local.github_sub_baseline_dev]
+    }
+  }
+}
+
+resource "aws_iam_role" "baseline_dev" {
+  name        = "${var.org_prefix}-baseline-dev-role"
+  description = "Assumed by apply-baseline to deploy into EAF-DEV. No management account permissions."
+
+  assume_role_policy   = data.aws_iam_policy_document.baseline_dev_trust.json
+  max_session_duration = 7200
+}
+
+data "aws_iam_policy_document" "baseline_dev_policy" {
+  statement {
+    sid     = "AssumeIntoMemberAccounts"
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    resources = [
+      "arn:${local.partition}:iam::*:role/OrganizationAccountAccessRole",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "baseline_dev" {
+  name   = "assume-organization-account-access-role"
+  role   = aws_iam_role.baseline_dev.id
+  policy = data.aws_iam_policy_document.baseline_dev_policy.json
+}
+
+# ── prod baseline role ────────────────────────────────────────────────────
+data "aws_iam_policy_document" "baseline_prod_trust" {
+  statement {
+    sid     = "GitHubActionsProdEnvironment"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.github_oidc_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [local.github_sub_baseline_prod]
+    }
+  }
+}
+
+resource "aws_iam_role" "baseline_prod" {
+  name        = "${var.org_prefix}-baseline-prod-role"
+  description = "Assumed by apply-baseline to deploy into EAF-PROD. No management account permissions."
+
+  assume_role_policy   = data.aws_iam_policy_document.baseline_prod_trust.json
+  max_session_duration = 7200
+}
+
+resource "aws_iam_role_policy" "baseline_prod" {
+  name   = "assume-organization-account-access-role"
+  role   = aws_iam_role.baseline_prod.id
+  policy = data.aws_iam_policy_document.baseline_dev_policy.json
+}
