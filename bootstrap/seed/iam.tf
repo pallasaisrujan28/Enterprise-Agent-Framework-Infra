@@ -232,6 +232,32 @@ resource "aws_iam_role_policy" "bootstrap_plan_state_lock" {
   policy = data.aws_iam_policy_document.bootstrap_plan_state_lock.json
 }
 
+# The plan role needs to assume OrganizationAccountAccessRole in member accounts
+# so Terraform can plan the per-account baseline layers.
+#
+# Scoped to the role NAME only — any account in the organization. This is the
+# least-privilege form available because member account IDs are not known at
+# the time this policy is written (they are created by the org-structure layer
+# after seed runs). ReadOnlyAccess alone does not include sts:AssumeRole.
+data "aws_iam_policy_document" "bootstrap_plan_member_assume" {
+  statement {
+    sid    = "AssumeOrganizationAccountAccessRole"
+    effect = "Allow"
+    actions = [
+      "sts:AssumeRole",
+    ]
+    resources = [
+      "arn:${local.partition}:iam::*:role/OrganizationAccountAccessRole",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "bootstrap_plan_member_assume" {
+  name   = "assume-organization-account-access-role"
+  role   = aws_iam_role.bootstrap_plan.id
+  policy = data.aws_iam_policy_document.bootstrap_plan_member_assume.json
+}
+
 # --------------------------------------------------------------------------
 # APPLY ROLE — AdministratorAccess, reachable only through the approval gate.
 # --------------------------------------------------------------------------
