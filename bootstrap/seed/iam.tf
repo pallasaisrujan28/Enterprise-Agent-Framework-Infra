@@ -520,6 +520,39 @@ resource "aws_iam_role_policy" "baseline_dev" {
   policy = data.aws_iam_policy_document.baseline_dev_policy.json
 }
 
+# Terraform backend: the baseline roles need to read/write their own state
+# file in the management account's S3 bucket.
+data "aws_iam_policy_document" "baseline_dev_state" {
+  statement {
+    sid    = "ReadWriteDevState"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/accounts/dev/*",
+    ]
+  }
+  statement {
+    sid    = "DevStateLock"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = ["${aws_s3_bucket.state.arn}/accounts/dev/*.tflock"]
+  }
+}
+
+resource "aws_iam_role_policy" "baseline_dev_state" {
+  name   = "state-read-write"
+  role   = aws_iam_role.baseline_dev.id
+  policy = data.aws_iam_policy_document.baseline_dev_state.json
+}
+
 # ── prod baseline role ────────────────────────────────────────────────────
 data "aws_iam_policy_document" "baseline_prod_trust" {
   statement {
@@ -558,4 +591,35 @@ resource "aws_iam_role_policy" "baseline_prod" {
   name   = "assume-organization-account-access-role"
   role   = aws_iam_role.baseline_prod.id
   policy = data.aws_iam_policy_document.baseline_dev_policy.json
+}
+
+data "aws_iam_policy_document" "baseline_prod_state" {
+  statement {
+    sid    = "ReadWriteProdState"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/accounts/prod/*",
+    ]
+  }
+  statement {
+    sid    = "ProdStateLock"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = ["${aws_s3_bucket.state.arn}/accounts/prod/*.tflock"]
+  }
+}
+
+resource "aws_iam_role_policy" "baseline_prod_state" {
+  name   = "state-read-write"
+  role   = aws_iam_role.baseline_prod.id
+  policy = data.aws_iam_policy_document.baseline_prod_state.json
 }
