@@ -40,13 +40,12 @@ locals {
   github_sub_any_branch = "repo:${local.repo_owner}@${var.github_repository_owner_id}/${local.repo_name}@${var.github_repository_id}:ref:refs/heads/*"
 }
 
-# ── S3 account-level public access block ─────────────────────────────────────
-resource "aws_s3_account_public_access_block" "this" {
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
+# S3 account-level public access block is NOT managed here.
+#
+# The guardrail SCP denies s3:PutAccountPublicAccessBlock for all principals
+# in this account — which means Terraform cannot set it either. The SCP is
+# the real protection: no one can weaken the block once it is on, and AWS
+# enables it by default for all accounts created after April 2023.
 
 # ── GuardDuty ─────────────────────────────────────────────────────────────────
 resource "aws_guardduty_detector" "this" {
