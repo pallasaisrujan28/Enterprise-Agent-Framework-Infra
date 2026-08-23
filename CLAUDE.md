@@ -183,6 +183,71 @@ results after a pipeline run. Not for creating, modifying, or deleting resources
 
 ---
 
+## The pipeline rule — no exceptions
+
+**Every change to every environment must go through the established pipeline.**
+
+No resource is created, modified, or destroyed through:
+- Direct AWS CLI commands (`aws ec2 create-instance`, `aws iam put-role-policy`, etc.)
+- Direct Terraform runs from a local machine or terminal
+- Scripts written to apply a one-off fix or patch
+- The AWS Console
+- Any tool that bypasses Git, a PR, and the GitHub Actions pipeline
+
+This applies to everything: infrastructure, agent configuration, database
+migrations, security policies, secrets rotation, dependency updates. There
+are no exceptions for "quick fixes", "emergency patches", or "it's just
+a small change."
+
+### Why this rule is non-negotiable
+
+If a change is made outside the pipeline:
+- There is no record of what was changed or why
+- There is no plan output showing what would change before it changed
+- There is no approval gate
+- The Git history and the real state of the system diverge silently
+- The next pipeline run may revert, conflict with, or be confused by the
+  out-of-band change
+
+A change that cannot go through the pipeline is a signal that the pipeline
+needs to be extended — not bypassed.
+
+### What is allowed from the terminal in this project
+
+The terminal is for operations that do not change AWS or system state:
+
+| Allowed | Why |
+|---|---|
+| `gh workflow run` | Triggers the pipeline — the pipeline makes the change |
+| `gh run view --log` | Reading CI output to diagnose failures |
+| `aws sts get-caller-identity` | Verifying which account credentials resolve to |
+| `aws iam get-role` | Reading existing state for verification |
+| `aws organizations list-accounts` | Reading existing state for verification |
+| `git add`, `git commit`, `git push` | Creating commits and branches for PR review |
+| `gh pr create`, `gh pr merge` | GitHub platform operations — not AWS changes |
+
+| Not allowed | Why |
+|---|---|
+| `aws iam put-role-policy` | Direct AWS change — no plan, no approval, no audit |
+| `terraform apply` from terminal | Bypasses the pipeline approval gate |
+| `aws s3 cp` to production | Direct state change with no record |
+| Any script that creates or modifies cloud resources | Script = bypass |
+
+### When a bug or error blocks the pipeline itself
+
+If the pipeline is broken and cannot be fixed through a normal PR (e.g., the
+CI workflow has a syntax error that prevents it from running), the fix still
+goes through Git:
+
+1. Write the fix on a branch
+2. If CI cannot validate it, note why in the PR description
+3. Merge with a human review of the diff
+4. The pipeline resumes from that point
+
+The pipeline is not bypassed. The pipeline is fixed.
+
+---
+
 ## Infrastructure-specific decisions
 
 ### Every feature on its own branch
