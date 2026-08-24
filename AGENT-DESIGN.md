@@ -415,6 +415,99 @@ All questions to research when you actually hit them — not before:
 
 ---
 
+## FUTURE ENGINEERING TOPICS
+
+Topics from production agent research (DeepSeek, Kimi, Anthropic) that we must
+tackle as the system matures. Ordered roughly by when they become relevant.
+
+### Context Engineering ← highest priority future topic
+
+Anthropic named this explicitly. Every production agent system hits this wall.
+Context fills up, retrieval accuracy degrades (n² attention), and performance drops.
+
+**Sub-topics to implement:**
+
+| Topic | What it is | When we need it |
+|---|---|---|
+| **Compaction** | When context approaches the window limit, summarise the old conversation. Preserve: architectural decisions, unresolved errors, key facts. Discard: redundant tool outputs, superseded reasoning. | When multi-turn conversations start exceeding ~80k tokens |
+| **JIT retrieval** | Never load the full content of a document into context upfront. Keep lightweight identifiers (file paths, URLs, chunk IDs). Fetch only the specific parts the agent actually needs, at the moment it needs them. | When skill bodies or retrieved documents are large |
+| **Sub-agent isolation** | Each sub-agent gets a clean, minimal context window — not the parent's full history. Sub-agent does its work, returns a 1-2K token summary. Parent never sees the full trace. This prevents context from compounding across agent layers. | When we split into specialist agents (Phase 2) |
+| **External memory** | Agent writes its own progress to files (NOTES.md equivalent) and reloads them across sessions. State that must survive context resets lives in files, not in the conversation. Already partially done via AgentCore Memory and S3. | When long-running multi-step tasks start dropping context |
+| **Budget control** | Per-task token limits. If a task is approaching its budget, truncate and summarise rather than letting context explode. Kimi implemented this in RL training — we implement it in the agent loop. | When tasks run significantly longer than expected |
+| **Context anxiety mitigation** | Models prematurely wrap up work as they approach their context limit. Anthropic solved this by compacting at ~80% full (not 100%) and by reloading context from external memory. | When we observe agents stopping tasks early |
+
+**Research source:** Anthropic engineering blog — "Effective Context Engineering for AI Agents"
+
+---
+
+### Prompt injection protection
+
+Every tool result that comes from the outside world (web search, file read, API response) is untrusted input. A malicious website could contain instructions designed to hijack the agent.
+
+Anthropic runs a server-side prompt injection probe on all tool outputs before they enter the agent's context. On detection: warning injected instructing the agent to treat the content skeptically and re-anchor on the user's original intent.
+
+**What to build:** A pre-processing step in the tool execution layer that scans tool outputs for instruction-shaped content before passing them to the LLM.
+
+---
+
+### Think tool
+
+A minimal tool that gives the agent a mid-response scratchpad — not for external actions, just for reasoning between tool calls. Anthropic measured a 54% relative improvement in policy-heavy environments (like airline booking with many rules).
+
+```python
+@tool
+def think(thought: str) -> str:
+    """Use this to reason about tool results before deciding the next action."""
+    return ""  # returns nothing — just logs the thought
+```
+
+Distinct from extended thinking (which is pre-response). Called after receiving a tool result to process what it means before deciding what to call next. Particularly useful for sequential tool chains where each step depends on reasoning about the previous step.
+
+---
+
+### Async multi-agent coordination
+
+The current unresolved frontier. Both Anthropic and Kimi K2.5 acknowledge that subagent execution is currently **synchronous** — the orchestrator waits for a full batch before proceeding.
+
+Kimi K2.5 measures this as "critical path length." The fastest path is the bottleneck.
+
+For our system: when we parallelize across 10 research agents, the result takes as long as the slowest one. True async coordination (orchestrator receiving and acting on results as they arrive, not waiting for all) is not solved cleanly by anyone yet.
+
+**What to research when we get to parallel agents:** LangGraph streaming, async task queues, result-driven orchestration.
+
+---
+
+### Massive parallel agents — file-based coordination
+
+Anthropic's C compiler study: 16 parallel agents, NO orchestrator. Agents coordinate by claiming tasks via file locks in a shared git repo. No message queue, no shared memory, no direct inter-agent calls.
+
+```
+Agent wants a task:
+  → write workspaces/tasks/task_name.lock
+  → git commit + push
+  → if push succeeds: task is mine
+  → if push fails (someone else got it): try next task
+```
+
+This is the pattern for batch processing: "analyse 100 documents and find themes." 100 agent pods, S3 as the coordination layer, each pod claims files from a task list.
+
+**When relevant:** when we need to process large document sets in parallel without building an orchestrator.
+
+---
+
+### Two-stage safety classifier
+
+Anthropic uses a two-stage classifier on all non-trivial tool calls in auto mode:
+
+- Stage 1: single-token yes/no, tuned to err toward blocking (fast, cheap)
+- Stage 2: chain-of-thought reasoning, triggered only when Stage 1 flags (slow, expensive but rare)
+
+The classifier sees: user messages + tool call payloads. It deliberately does NOT see: assistant prose, tool outputs, tool descriptions. Reason: prevents the agent from "talking the classifier into a bad call."
+
+**When relevant:** when we add auto-mode (no human approval for any tool call).
+
+---
+
 ## FIRST THING TO BUILD
 
 Walking skeleton — confirms the architecture works end-to-end before adding anything:
