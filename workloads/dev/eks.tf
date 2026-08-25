@@ -242,3 +242,43 @@ resource "aws_eks_node_group" "langfuse" {
     aws_iam_role_policy_attachment.nodes_ecr,
   ]
 }
+
+# ── EKS access entry for OrganizationAccountAccessRole ────────────────────────
+# The Helm provider (used by Langfuse Terraform resources) runs `aws eks get-token`
+# as OrganizationAccountAccessRole. This access entry grants it cluster admin
+# so the Helm provider can create Kubernetes resources.
+
+resource "aws_eks_access_entry" "org_role" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole"
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "org_role_admin" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole"
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope {
+    type = "cluster"
+  }
+  depends_on = [aws_eks_access_entry.org_role]
+}
+
+# EKS access entry for the new workload deployer role.
+# Allows Helm provider to authenticate to EKS when deploying via this role.
+resource "aws_eks_access_entry" "workload_deployer" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = aws_iam_role.workload_deployer.arn
+  type          = "STANDARD"
+  depends_on    = [aws_iam_role.workload_deployer]
+}
+
+resource "aws_eks_access_policy_association" "workload_deployer_admin" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = aws_iam_role.workload_deployer.arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope {
+    type = "cluster"
+  }
+  depends_on = [aws_eks_access_entry.workload_deployer]
+}

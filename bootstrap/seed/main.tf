@@ -103,9 +103,37 @@ data "aws_iam_policy_document" "state_bucket" {
   }
 }
 
+data "aws_iam_policy_document" "state_bucket_combined" {
+  source_policy_documents = [data.aws_iam_policy_document.state_bucket.json]
+
+  # Allow workload deployer roles (in member accounts) to access their
+  # own state paths cross-account. Each workload deployer role is scoped to
+  # its own path (workloads/dev/*, workloads/prod/*) via its own IAM policy.
+  statement {
+    sid    = "CrossAccountWorkloadDeployers"
+    effect = "Allow"
+    principals {
+      type = "AWS"
+      identifiers = [
+        "arn:${local.partition}:iam::718438899462:role/eaf-workload-dev-deployer-role",
+      ]
+    }
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/workloads/dev/*",
+    ]
+  }
+}
+
 resource "aws_s3_bucket_policy" "state" {
   bucket = aws_s3_bucket.state.id
-  policy = data.aws_iam_policy_document.state_bucket.json
+  policy = data.aws_iam_policy_document.state_bucket_combined.json
 }
 
 # Optional DynamoDB lock table, off by default.
