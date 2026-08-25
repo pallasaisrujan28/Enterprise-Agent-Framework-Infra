@@ -1,20 +1,7 @@
-# DEPLOY ACCOUNTS — applies bootstrap/org-structure.
-#
-# Creates and manages:
-#   AWS Organisational Units (OUs)
-#   Guardrail Service Control Policies (SCPs)
-#   Control Tower enrollment for new OUs
-#   Member AWS accounts (from accounts/register.yaml)
-#
-# The normal trigger is merging an accounts/register.yaml change (PR opened
-# by a developer after running register-account workflow). Manual dispatch
-# is available for re-runs without a new commit.
-#
-# ACCOUNT CREATION IS EFFECTIVELY PERMANENT.
-# Closure takes 90 days. A closed account still counts against the quota.
-# Read the plan before approving.
-
 name: deploy-accounts
+# Applies bootstrap/org-structure: OUs, SCPs, Control Tower enrollment, member accounts.
+# Run this after merging an accounts/register.yaml change.
+# Account creation is permanent. Read the plan before approving.
 
 on:
   workflow_dispatch:
@@ -40,25 +27,20 @@ jobs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
     steps:
       - uses: actions/checkout@v4
-
       - name: check confirmation
         run: |
           if [[ "${{ inputs.confirm }}" != "apply" ]]; then
-            echo "type the word apply in the confirm field to proceed" >&2
-            exit 1
+            echo "type the word apply in the confirm field to proceed" >&2; exit 1
           fi
-
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-accounts-plan-${{ github.run_id }}
-
       - name: verify account
         run: |
           set -euo pipefail
@@ -66,51 +48,41 @@ jobs:
           if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
             echo "refusing: credentials resolve to $actual" >&2; exit 1
           fi
-
       - name: plan
         id: plan
         working-directory: bootstrap/org-structure
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
-
           set +e
           terraform plan -no-color -input=false -lock-timeout=5m \
             -out=tfplan \
             -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
-            -detailed-exitcode \
-            | tee plan.txt
+            -detailed-exitcode | tee plan.txt
           code=${PIPESTATUS[0]}
           set -e
-
           if ! grep -qE '^(Plan: |No changes)' plan.txt; then
-            echo "no plan summary found — do not trust this run" >&2; exit 1
+            echo "no plan summary found" >&2; exit 1
           fi
-
           case "$code" in
             0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
             2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
-            *) echo "plan failed with exit code $code" >&2; exit "$code" ;;
+            *) exit "$code" ;;
           esac
-
           terraform show -json tfplan > plan.json
-
       - name: validate SCP
         run: bash scripts/check-policies.sh bootstrap/org-structure/plan.json policy-out
-
       - name: summary
         if: always()
         working-directory: bootstrap/org-structure
         run: |
           {
-            echo "## Accounts plan — awaiting approval"
+            echo "## Accounts plan"
             echo '```'
             grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
             echo '```'
-            echo "**Creating an account is permanent. Closure takes 90 days.**"
-            echo "Read the full plan in the job log before approving."
+            echo "**Account creation is permanent. Read the full plan before approving.**"
           } >> "$GITHUB_STEP_SUMMARY"
-
       - uses: actions/upload-artifact@v4
         with:
           name: tfplan-accounts-${{ github.run_id }}
@@ -128,7 +100,6 @@ jobs:
     concurrency:
       group: deploy-accounts
       cancel-in-progress: false
-
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
