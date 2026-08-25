@@ -47,5 +47,8 @@ resource "aws_ecr_lifecycle_policy" "agent" {
 # Results appear in ECR console, Security Hub, and Inspector console.
 resource "aws_inspector2_enabler" "this" {
   account_ids    = [var.account_id]
-  resource_types = ["ECR", "EC2"]
+  resource_types = ["ECR"]
+  # EC2 scanning excluded: EKS worker nodes run AWS-managed EKS-optimised AMIs.
+  # AWS handles patching via AMI updates. EC2 findings on managed nodes are
+  # not directly actionable by us.
 }
