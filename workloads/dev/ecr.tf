@@ -42,13 +42,8 @@ resource "aws_ecr_lifecycle_policy" "agent" {
   })
 }
 
-# Enable Amazon Inspector v2 for this account.
-# Scans ECR images for OS and language package vulnerabilities.
-# Results appear in ECR console, Security Hub, and Inspector console.
-resource "aws_inspector2_enabler" "this" {
-  account_ids    = [var.account_id]
-  resource_types = ["ECR"]
-  # EC2 scanning excluded: EKS worker nodes run AWS-managed EKS-optimised AMIs.
-  # AWS handles patching via AMI updates. EC2 findings on managed nodes are
-  # not directly actionable by us.
-}
+# Vulnerability scanning is handled in the agent deployment pipeline:
+#   pip-audit  → scans Python packages before building the image (fast, early)
+#   trivy      → scans the Docker image after build, before push to ECR
+# Inspector is not used — pipeline scanning catches issues earlier and is free.
+# Add Inspector if compliance requires ongoing rescan of deployed images.
