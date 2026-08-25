@@ -154,3 +154,105 @@ resource "aws_iam_role_policy" "agent_ecr" {
   role   = aws_iam_role.agent.id
   policy = data.aws_iam_policy_document.agent_ecr.json
 }
+
+# --------------------------------------------------------------------------
+# AGENT CI ROLE — assumed by Enterprise-Agent-Framework repo GitHub Actions
+# --------------------------------------------------------------------------
+#
+# This role lets the agent code repo's CI pipeline:
+#   1. Push Docker images to ECR in this account
+#   2. Update the EKS deployment (rolling deploy via kubectl)
+#
+# Created here (in workloads/dev) because it is specific to this workload.
+# It has nothing to do with the bootstrap/seed layer.
+#
+# The OIDC provider was created by the account baseline layer.
+# Agent repo:  pallasaisrujan28/Enterprise-Agent-Framework  (id: 1317099884)
+# Owner id:    194785418
+
+locals {
+  agent_repo_sub = "repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework@1317099884:ref:refs/heads/*"
+}
+
+data "aws_iam_policy_document" "agent_ci_trust" {
+  statement {
+    sid     = "AgentRepoCIAccess"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [local.agent_repo_sub]
+    }
+  }
+}
+
+resource "aws_iam_role" "agent_ci" {
+  name        = "eaf-agent-ci-role"
+  description = "Assumed by Enterprise-Agent-Framework CI to push images to ECR and deploy to EKS."
+
+  assume_role_policy   = data.aws_iam_policy_document.agent_ci_trust.json
+  max_session_duration = 3600
+
+  permissions_boundary = "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:policy/eaf-workload-boundary"
+
+  tags = { ManagedBy = "terraform", Environment = "dev" }
+}
+
+data "aws_iam_policy_document" "agent_ci_policy" {
+  # ECR auth — needed to get a login token before docker push
+  statement {
+    sid       = "ECRAuth"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  # ECR push — scoped to eaf/* repositories in this account only
+  statement {
+    sid    = "ECRPush"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+      "ecr:PutImage",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:DescribeImages",
+      "ecr:ListImages",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:ecr:${var.region}:${var.account_id}:repository/eaf/*",
+    ]
+  }
+
+  # EKS describe cluster — needed to generate kubeconfig for kubectl
+  statement {
+    sid    = "EKSDescribe"
+    effect = "Allow"
+    actions = [
+      "eks:DescribeCluster",
+    ]
+    resources = [aws_eks_cluster.this.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "agent_ci" {
+  name   = "ecr-push-eks-deploy"
+  role   = aws_iam_role.agent_ci.id
+  policy = data.aws_iam_policy_document.agent_ci_policy.json
+}
