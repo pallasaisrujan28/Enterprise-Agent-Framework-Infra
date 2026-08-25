@@ -130,21 +130,27 @@ resource "aws_iam_role_policy" "agent_s3" {
   policy = data.aws_iam_policy_document.agent_s3.json
 }
 
-# ── Secrets Manager: read DB credentials ──────────────────────────────────────
+# ── ECR: pull agent images ─────────────────────────────────────────────────────
+# The node group role already has AmazonEC2ContainerRegistryReadOnly attached.
+# The agent service account also gets explicit pull access for cross-account
+# scenarios in the future.
 
-data "aws_iam_policy_document" "agent_secrets" {
+data "aws_iam_policy_document" "agent_ecr" {
   statement {
-    sid    = "ReadDbCredentials"
+    sid    = "PullAgentImage"
     effect = "Allow"
     actions = [
-      "secretsmanager:GetSecretValue",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetAuthorizationToken",
     ]
-    resources = [aws_secretsmanager_secret.db_password.arn]
+    resources = ["*"]
   }
 }
 
-resource "aws_iam_role_policy" "agent_secrets" {
-  name   = "read-db-credentials"
+resource "aws_iam_role_policy" "agent_ecr" {
+  name   = "ecr-pull"
   role   = aws_iam_role.agent.id
-  policy = data.aws_iam_policy_document.agent_secrets.json
+  policy = data.aws_iam_policy_document.agent_ecr.json
 }

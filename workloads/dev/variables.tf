@@ -42,8 +42,3 @@ variable "bedrock_fast_model" {
   default     = "anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
-variable "db_name" {
-  description = "Database name for LangGraph checkpointer."
-  type        = string
-  default     = "langgraph"
-}

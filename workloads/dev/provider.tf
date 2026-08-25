@@ -6,10 +6,6 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
     tls = {
       source  = "hashicorp/tls"
       version = "~> 4.0"
@@ -31,7 +27,6 @@ provider "aws" {
 }
 
 # Data sources resolved in the context of EAF-DEV.
-data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 data "aws_availability_zones" "available" {
   state = "available"

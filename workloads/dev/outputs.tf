@@ -19,14 +19,9 @@ output "agent_role_arn" {
   value       = aws_iam_role.agent.arn
 }
 
-output "db_endpoint" {
-  description = "Aurora writer endpoint for LangGraph PostgresSaver."
-  value       = aws_rds_cluster.aurora.endpoint
-}
-
-output "db_credentials_secret_arn" {
-  description = "Secrets Manager ARN for DB credentials. Mount in the agent pod or read at startup."
-  value       = aws_secretsmanager_secret.db_password.arn
+output "ecr_repository_url" {
+  description = "ECR repository URL. Agent CI pushes to this: docker push <url>:tag"
+  value       = aws_ecr_repository.agent.repository_url
 }
 
 output "workspaces_bucket" {
