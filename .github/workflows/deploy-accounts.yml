@@ -137,4 +137,4 @@ jobs:
     if: needs.plan.outputs.has_changes == 'false'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "### Accounts: no changes" >> "$GITHUB_STEP_SUMMARY"
+      - run: echo '### Accounts: no changes' >> "$GITHUB_STEP_SUMMARY"
