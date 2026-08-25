@@ -201,3 +201,44 @@ resource "aws_eks_addon" "vpc_cni" {
   addon_name                  = "vpc-cni"
   resolve_conflicts_on_update = "OVERWRITE"
 }
+
+# ── Langfuse node group ────────────────────────────────────────────────────────
+# ClickHouse needs more memory than our default t3.medium nodes (2 vCPU, 4 GB).
+# A dedicated t3.large node group (2 vCPU, 8 GB) keeps Langfuse isolated from
+# agent workloads and prevents ClickHouse from evicting agent pods.
+
+resource "aws_eks_node_group" "langfuse" {
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "langfuse"
+  node_role_arn   = aws_iam_role.nodes.arn
+  subnet_ids      = aws_subnet.private[*].id
+  instance_types  = ["t3.large"]
+
+  scaling_config {
+    desired_size = 1
+    min_size     = 1
+    max_size     = 2
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  # Taint: only pods that tolerate this run on Langfuse nodes.
+  # Prevents agent pods from being scheduled here.
+  taint {
+    key    = "dedicated"
+    value  = "langfuse"
+    effect = "NO_SCHEDULE"
+  }
+
+  labels = { dedicated = "langfuse", ManagedBy = "terraform" }
+
+  tags = { ManagedBy = "terraform" }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.nodes_worker,
+    aws_iam_role_policy_attachment.nodes_cni,
+    aws_iam_role_policy_attachment.nodes_ecr,
+  ]
+}
