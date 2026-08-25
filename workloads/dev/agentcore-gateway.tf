@@ -253,51 +253,40 @@ resource "aws_iam_role_policy" "gateway_execution" {
 # ── AgentCore Gateway ──────────────────────────────────────────────────────────
 # The managed MCP server resource.
 #
-# Provider status note:
-#   The hashicorp/aws provider is adding AgentCore resources in v5.x.
-#   If `terraform plan` fails with "unsupported argument" or "resource type not
-#   supported", check the provider changelog for the exact resource name and
-#   update accordingly. The awscc provider (AWS Cloud Control API) may have it
-#   sooner under awscc_bedrock_agentcore_gateway.
+# ── AgentCore Gateway resource ────────────────────────────────────────────────
+# PENDING PROVIDER SUPPORT
 #
-# The resource is written here with the most current documented API shape.
-# Once verified against the provider, remove the lifecycle ignore_changes guard.
-
-resource "aws_bedrockagentcore_gateway" "eaf" {
-  name        = "eaf-dev-tools-gateway"
-  description = "MCP tool gateway for EAF agent. All tool calls route through here — access control via Cognito JWT scopes."
-
-  role_arn = aws_iam_role.gateway_execution.arn
-
-  # Cognito JWT authorizer: validates tokens issued by our User Pool.
-  authorizer_configuration {
-    type = "COGNITO_USER_POOL"
-
-    cognito_user_pool_configuration {
-      user_pool_arn = aws_cognito_user_pool.gateway.arn
-      app_client_id = aws_cognito_user_pool_client.eaf_agent.id
-      discovery_url = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.gateway.id}/.well-known/openid-configuration"
-    }
-  }
-
-  # Data residency: all routing in eu-west-2.
-  # VPC config lets the Gateway reach internal K8s tool services.
-  vpc_configuration {
-    subnet_ids         = aws_subnet.private[*].id
-    security_group_ids = [aws_security_group.gateway_egress.id]
-  }
-
-  tags = {
-    ManagedBy   = "terraform"
-    Environment = "dev"
-  }
-
-  # Once created, the endpoint URL is used by the agent. Ignore auth changes
-  # after initial creation — rotate via Cognito, not Terraform.
-  lifecycle {
-    ignore_changes = [authorizer_configuration]
-  }
-}
+# aws_bedrockagentcore_gateway is not yet available in hashicorp/aws ~5.x.
+# The resource block is commented out until the provider adds support.
+# Everything else in this file (Cognito, IAM, Secrets Manager, security group,
+# SSM) applies and is deployed now.
+#
+# When the provider adds the resource (check: terraform providers schema | grep
+# bedrockagentcore), uncomment the block below and re-apply.
+#
+# resource "aws_bedrockagentcore_gateway" "eaf" {
+#   name        = "eaf-dev-tools-gateway"
+#   description = "MCP tool gateway for EAF agent — Cognito JWT auth, VPC routing to K8s"
+#   role_arn    = aws_iam_role.gateway_execution.arn
+#
+#   authorizer_configuration {
+#     type = "COGNITO_USER_POOL"
+#     cognito_user_pool_configuration {
+#       user_pool_arn = aws_cognito_user_pool.gateway.arn
+#       app_client_id = aws_cognito_user_pool_client.eaf_agent.id
+#       discovery_url = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.gateway.id}/.well-known/openid-configuration"
+#     }
+#   }
+#
+#   vpc_configuration {
+#     subnet_ids         = aws_subnet.private[*].id
+#     security_group_ids = [aws_security_group.gateway_egress.id]
+#   }
+#
+#   tags = { ManagedBy = "terraform", Environment = "dev" }
+#
+#   lifecycle { ignore_changes = [authorizer_configuration] }
+# }
 
 # Security group: Gateway → K8s tool services (outbound only, no inbound).
 resource "aws_security_group" "gateway_egress" {
@@ -328,11 +317,13 @@ resource "aws_security_group" "gateway_egress" {
 # These let the EKS deployment pick up the Gateway config without hard-coding
 # ARNs or URLs in Kubernetes manifests.
 
+# gateway_endpoint SSM parameter — populated after aws_bedrockagentcore_gateway
+# is uncommented and applied. Placeholder value until then.
 resource "aws_ssm_parameter" "gateway_endpoint" {
   name        = "/eaf/dev/gateway/endpoint"
   type        = "String"
-  description = "AgentCore Gateway MCP endpoint URL"
-  value       = aws_bedrockagentcore_gateway.eaf.endpoint_url
+  description = "AgentCore Gateway MCP endpoint URL — update after Gateway resource is applied"
+  value       = "PENDING"
 }
 
 resource "aws_ssm_parameter" "gateway_creds_secret_arn" {
