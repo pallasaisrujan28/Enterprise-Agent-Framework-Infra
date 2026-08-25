@@ -534,6 +534,7 @@ data "aws_iam_policy_document" "baseline_dev_state" {
     resources = [
       aws_s3_bucket.state.arn,
       "${aws_s3_bucket.state.arn}/accounts/dev/*",
+      "${aws_s3_bucket.state.arn}/workloads/dev/*",
     ]
   }
   statement {
@@ -543,7 +544,10 @@ data "aws_iam_policy_document" "baseline_dev_state" {
       "s3:PutObject",
       "s3:DeleteObject",
     ]
-    resources = ["${aws_s3_bucket.state.arn}/accounts/dev/*.tflock"]
+    resources = [
+      "${aws_s3_bucket.state.arn}/accounts/dev/*.tflock",
+      "${aws_s3_bucket.state.arn}/workloads/dev/*.tflock",
+    ]
   }
 }
 
