@@ -111,8 +111,8 @@ resource "aws_cognito_user_pool_client" "eaf_agent" {
 
   supported_identity_providers = ["COGNITO"]
 
-  access_token_validity  = 1   # hour — short-lived, refreshed by token manager
-  refresh_token_validity = 30  # days (not used in M2M, but Cognito requires it)
+  access_token_validity  = 1  # hour — short-lived, refreshed by token manager
+  refresh_token_validity = 30 # days (not used in M2M, but Cognito requires it)
   token_validity_units {
     access_token  = "hours"
     refresh_token = "days"
@@ -211,8 +211,8 @@ resource "aws_iam_role" "gateway_execution" {
 data "aws_iam_policy_document" "gateway_execution" {
   # Future Lambda targets: Gateway invokes Lambda functions named eaf-dev-tool-*
   statement {
-    sid    = "InvokeLambdaTargets"
-    effect = "Allow"
+    sid     = "InvokeLambdaTargets"
+    effect  = "Allow"
     actions = ["lambda:InvokeFunction"]
     resources = [
       "arn:${data.aws_partition.current.partition}:lambda:${var.region}:${var.account_id}:function:eaf-dev-tool-*",
@@ -274,9 +274,9 @@ resource "aws_bedrockagentcore_gateway" "eaf" {
     type = "COGNITO_USER_POOL"
 
     cognito_user_pool_configuration {
-      user_pool_arn    = aws_cognito_user_pool.gateway.arn
-      app_client_id    = aws_cognito_user_pool_client.eaf_agent.id
-      discovery_url    = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.gateway.id}/.well-known/openid-configuration"
+      user_pool_arn = aws_cognito_user_pool.gateway.arn
+      app_client_id = aws_cognito_user_pool_client.eaf_agent.id
+      discovery_url = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.gateway.id}/.well-known/openid-configuration"
     }
   }
 
