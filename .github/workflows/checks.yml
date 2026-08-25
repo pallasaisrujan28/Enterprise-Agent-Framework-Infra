@@ -1,9 +1,0 @@
-name: deprecated
-on:
-  workflow_dispatch:
-jobs:
-  noop:
-    runs-on: ubuntu-latest
-    if: false
-    steps:
-      - run: echo "deprecated"
