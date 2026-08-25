@@ -82,19 +82,19 @@ resource "aws_security_group" "nodes" {
   vpc_id      = aws_vpc.this.id
 
   ingress {
-    from_port       = 0
-    to_port         = 0
-    protocol        = "-1"
-    self            = true
-    description     = "Allow intra-node communication"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    self        = true
+    description = "Allow intra-node communication"
   }
 
   ingress {
-    from_port                = 1025
-    to_port                  = 65535
-    protocol                 = "tcp"
-    security_groups          = [aws_security_group.cluster.id]
-    description              = "Allow control plane to reach nodes"
+    from_port       = 1025
+    to_port         = 65535
+    protocol        = "tcp"
+    security_groups = [aws_security_group.cluster.id]
+    description     = "Allow control plane to reach nodes"
   }
 
   egress {
