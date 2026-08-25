@@ -118,8 +118,8 @@ resource "helm_release" "langfuse" {
       }
 
       clickhouse = {
-        deploy = true
-        shards = 1
+        deploy   = true
+        shards   = 1
         replicas = 1
       }
 
