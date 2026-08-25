@@ -1,3 +1,4 @@
+SHELL := /bin/bash
 .PHONY: fmt fmt-check lint validate check install-hooks
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
