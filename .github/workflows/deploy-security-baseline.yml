@@ -1,0 +1,212 @@
+# APPLY BASELINE — deploys the per-account baseline into EAF-DEV or EAF-PROD.
+#
+# Run this AFTER the account exists and Control Tower has finished enrolling it.
+# CT creates CloudTrail and Config; this layer adds GuardDuty, Security Hub,
+# the permissions boundary, the GitHub OIDC provider, the workload CI role,
+# and the budget alert.
+#
+# Approval gates:
+#   dev   no approval — the SCP on the Workloads OU is the ceiling, so
+#         unreviewed changes in dev are cheap mistakes, not dangerous ones.
+#   prod  required approval — changes to the production baseline always
+#         go through a human gate.
+#
+# The pipeline authenticates using OrganizationAccountAccessRole, which AWS
+# creates automatically in every member account and trusts the management
+# account. No additional role setup is needed in the member account.
+
+name: deploy-security-baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which account baseline to apply"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      confirm:
+        description: 'Type "apply" to confirm'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: 1.13.3
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check confirmation
+        run: |
+          if [[ "${{ inputs.confirm }}" != "apply" ]]; then
+            echo "type the word apply in the confirm field to proceed" >&2
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-baseline-plan-${{ github.run_id }}
+
+      - name: verify management account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2; exit 1
+          fi
+
+      - name: plan
+        id: plan
+        working-directory: accounts/${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+
+          set +e
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -out=tfplan \
+            -detailed-exitcode \
+            | tee plan.txt
+          code=${PIPESTATUS[0]}
+          set -e
+
+          if ! grep -qE '^(Plan: |No changes)' plan.txt; then
+            echo "no plan summary found — do not trust this run" >&2; exit 1
+          fi
+
+          case "$code" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "plan failed with exit code $code" >&2; exit "$code" ;;
+          esac
+
+      - name: summary
+        if: always()
+        working-directory: accounts/${{ inputs.target }}
+        run: |
+          {
+            echo "## ${{ inputs.target }} baseline — awaiting approval"
+            echo '```'
+            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-baseline-${{ inputs.target }}-${{ github.run_id }}
+          path: |
+            accounts/${{ inputs.target }}/tfplan
+            accounts/${{ inputs.target }}/plan.txt
+          retention-days: 5
+
+  # Dev: no approval gate. The SCP on the Workloads OU enforces the ceiling.
+  apply-dev:
+    name: apply (dev — no gate)
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true' && inputs.target == 'dev'
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: apply-baseline-dev
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-baseline-dev-${{ github.run_id }}
+          path: accounts/dev
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-baseline-apply-dev-${{ github.run_id }}
+      - name: apply
+        working-directory: accounts/dev
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform apply -no-color -input=false -lock-timeout=5m tfplan
+      - name: outputs
+        working-directory: accounts/dev
+        run: |
+          {
+            echo "## dev baseline applied"
+            echo '```'
+            terraform output -no-color
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Prod: approval required. Changes to production always go through a human gate.
+  apply-prod:
+    name: apply (prod — approval required)
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true' && inputs.target == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+    concurrency:
+      group: apply-baseline-prod
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-baseline-prod-${{ github.run_id }}
+          path: accounts/prod
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BASELINE_PROD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-baseline-apply-prod-${{ github.run_id }}
+      - name: apply
+        working-directory: accounts/prod
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform apply -no-color -input=false -lock-timeout=5m tfplan
+      - name: outputs
+        working-directory: accounts/prod
+        run: |
+          {
+            echo "## prod baseline applied"
+            echo '```'
+            terraform output -no-color
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  no_changes:
+    name: nothing to apply
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "### ${{ inputs.target }} baseline has no changes" >> "$GITHUB_STEP_SUMMARY"
