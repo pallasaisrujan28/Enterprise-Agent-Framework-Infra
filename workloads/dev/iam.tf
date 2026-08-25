@@ -256,3 +256,105 @@ resource "aws_iam_role_policy" "agent_ci" {
   role   = aws_iam_role.agent_ci.id
   policy = data.aws_iam_policy_document.agent_ci_policy.json
 }
+
+# --------------------------------------------------------------------------
+# WORKLOAD DEPLOYER ROLE — direct OIDC to EAF-DEV (no management account hop)
+# --------------------------------------------------------------------------
+#
+# WHY THIS EXISTS:
+# The management account's OIDC should only handle org-level operations
+# (seed, accounts). Workload deployments (EKS, VPC, ECR) belong in
+# EAF-DEV directly — the management account should not be in the loop.
+#
+# This role trusts the GitHub OIDC provider INSIDE EAF-DEV (already created
+# by the account baseline layer). The infra repo's deploy-eks-workload
+# workflow will use this role on all deployments after it is first created.
+#
+# First deploy: still uses eaf-baseline-dev-role (bootstrap requirement)
+# All future deploys: directly assume this role — no management account involved
+#
+# Infra repo: pallasaisrujan28/Enterprise-Agent-Framework-Infra (id: 1324052608)
+
+locals {
+  infra_repo_sub = "repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:ref:refs/heads/*"
+}
+
+data "aws_iam_policy_document" "workload_deployer_trust" {
+  statement {
+    sid     = "InfraRepoDirect"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [local.infra_repo_sub]
+    }
+  }
+}
+
+resource "aws_iam_role" "workload_deployer" {
+  name        = "eaf-workload-dev-deployer-role"
+  description = "Used by deploy-eks-workload to deploy infra directly to EAF-DEV. No management account hop."
+
+  assume_role_policy   = data.aws_iam_policy_document.workload_deployer_trust.json
+  max_session_duration = 7200
+
+  # No permissions boundary — this role deploys infrastructure, not application code.
+  # The SCP on the Workloads OU is the real ceiling.
+  tags = { ManagedBy = "terraform", Environment = "dev" }
+}
+
+# AdministratorAccess within EAF-DEV.
+# The SCP on the Workloads OU limits what this can actually do regardless:
+# no long-lived credentials, no public S3, Bedrock locked to London.
+resource "aws_iam_role_policy_attachment" "workload_deployer_admin" {
+  role       = aws_iam_role.workload_deployer.name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AdministratorAccess"
+}
+
+# Cross-account S3: read/write the Terraform state for this workload layer.
+# The state bucket lives in the management account (193027353132).
+# The bucket policy (added in bootstrap/seed/main.tf) allows this role
+# cross-account access to workloads/dev/* objects.
+data "aws_iam_policy_document" "workload_deployer_state" {
+  statement {
+    sid    = "WorkloadDevStateCrossAccount"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:s3:::eaf-bootstrap-tfstate-193027353132",
+      "arn:${data.aws_partition.current.partition}:s3:::eaf-bootstrap-tfstate-193027353132/workloads/dev/*",
+    ]
+  }
+  statement {
+    sid    = "WorkloadDevStateLock"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = ["arn:${data.aws_partition.current.partition}:s3:::eaf-bootstrap-tfstate-193027353132/workloads/dev/*.tflock"]
+  }
+}
+
+resource "aws_iam_role_policy" "workload_deployer_state" {
+  name   = "cross-account-state-access"
+  role   = aws_iam_role.workload_deployer.id
+  policy = data.aws_iam_policy_document.workload_deployer_state.json
+}
