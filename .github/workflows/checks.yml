@@ -43,21 +43,13 @@ jobs:
           # output — and a grep that silently matches nothing reports success.
           terraform_wrapper: false
 
-      # Formatting first: it is the fastest check and the most common failure.
-      - name: terraform fmt
-        run: terraform fmt -check -recursive -diff
+      # Same commands as `make fmt-check` and `make validate` — Makefile is the
+      # single source of truth. Run `make fmt` locally to auto-fix before committing.
+      - name: fmt check
+        run: make fmt-check
 
-      - name: terraform validate
-        run: |
-          set -euo pipefail
-          # Every directory holding .tf files is a separate program with its own
-          # init. There is no repository-wide validate.
-          for dir in $(find . -name '*.tf' -not -path './.git/*' -exec dirname {} \; | sort -u); do
-            echo "::group::validate $dir"
-            terraform -chdir="$dir" init -backend=false -input=false -no-color
-            terraform -chdir="$dir" validate -no-color
-            echo "::endgroup::"
-          done
+      - name: validate
+        run: make validate
 
   tflint:
     runs-on: ubuntu-latest
@@ -68,13 +60,9 @@ jobs:
         with:
           tflint_version: v0.59.1
 
-      - name: tflint
-        run: |
-          set -euo pipefail
-          tflint --init
-          # --recursive walks every directory. Without it tflint checks only the
-          # root and reports clean while never having looked at bootstrap/.
-          tflint --recursive --format compact
+      # Same command as `make lint` — Makefile is the single source of truth.
+      - name: lint
+        run: make lint
 
   validate-register:
     name: validate register

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Pre-push hook — runs automatically before every git push.
+# Install once with: make install-hooks
+#
+# Checks:
+#   1. terraform fmt  — fails if any .tf file needs formatting
+#   2. tflint         — fails on any lint rule violation
+#
+# To fix formatting before pushing: make fmt && git add -u && git commit --amend
+set -euo pipefail
+
+echo "→ terraform fmt check..."
+if ! terraform fmt -check -recursive -diff 2>&1; then
+  echo ""
+  echo "✗ Formatting check failed. Run: make fmt"
+  echo "  Then commit the changes and push again."
+  exit 1
+fi
+
+echo "→ tflint..."
+if ! tflint --init --recursive --format compact 2>&1; then
+  echo ""
+  echo "✗ tflint found issues. Fix them before pushing."
+  exit 1
+fi
+
+echo "✓ All checks passed."
