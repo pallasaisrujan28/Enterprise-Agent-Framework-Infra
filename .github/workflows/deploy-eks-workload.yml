@@ -1,20 +1,22 @@
-name: Deploy — EKS workload
-# APPLY WORKLOAD — deploys EKS, Aurora, S3, and IAM into EAF-DEV or EAF-PROD.
+name: Apply — EKS workload
+# Applies workloads/eaf/dev or workloads/eaf/prod into EAF-DEV / EAF-PROD.
 #
-# Run AFTER the account baseline is applied (GuardDuty, Security Hub, CI role).
-# This layer creates the actual compute infrastructure for the agent:
-#   - VPC with public/private subnets and NAT gateway
-#   - EKS cluster with managed node group
-#   - Aurora PostgreSQL Serverless v2 (LangGraph checkpointer)
-#   - S3 workspace bucket
-#   - IRSA role for the agent pod (Bedrock, AgentCore, S3, Secrets Manager)
+# Triggers:
+#   push to main touching workloads/eaf/dev/**  → auto-applies dev (no gate)
+#   workflow_dispatch target=dev                 → manual dev apply
+#   workflow_dispatch target=prod                → manual prod apply (approval gate)
 #
-# Approval gates:
-#   dev   no approval — disposable, SCP guardrails the risk
-#   prod  required approval
-
+# Why auto-apply dev:
+#   Dev is disposable. SCP guardrails + immutable OIDC trust are the blast-radius
+#   controls. A broken dev apply can be reverted or reapplied immediately.
+#   Prod always requires a human in the loop.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "workloads/eaf/dev/**"
+
   workflow_dispatch:
     inputs:
       target:
@@ -38,20 +40,37 @@ env:
   TF_IN_AUTOMATION: "true"
 
 jobs:
+  # Resolve target and confirm from either push context or manual inputs
+  vars:
+    name: resolve vars
+    runs-on: ubuntu-latest
+    outputs:
+      target: ${{ steps.set.outputs.target }}
+      is_dev: ${{ steps.set.outputs.is_dev }}
+    steps:
+      - id: set
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Auto-triggered by push to main — always dev, no confirmation needed
+            echo "target=dev" >> "$GITHUB_OUTPUT"
+            echo "is_dev=true" >> "$GITHUB_OUTPUT"
+          else
+            # Manual dispatch — validate confirmation
+            if [[ "${{ inputs.confirm }}" != "apply" ]]; then
+              echo "type the word apply in the confirm field to proceed" >&2; exit 1
+            fi
+            echo "target=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+            echo "is_dev=${{ inputs.target == 'dev' }}" >> "$GITHUB_OUTPUT"
+          fi
+
   plan:
     name: plan
+    needs: vars
     runs-on: ubuntu-latest
     outputs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: check confirmation
-        run: |
-          if [[ "${{ inputs.confirm }}" != "apply" ]]; then
-            echo "type the word apply in the confirm field to proceed" >&2
-            exit 1
-          fi
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -66,7 +85,7 @@ jobs:
 
       - name: plan
         id: plan
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/eaf/${{ needs.vars.outputs.target }}
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
@@ -91,27 +110,26 @@ jobs:
 
       - name: summary
         if: always()
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/eaf/${{ needs.vars.outputs.target }}
         run: |
           {
-            echo "## ${{ inputs.target }} workload plan"
+            echo "## ${{ needs.vars.outputs.target }} workload plan"
             echo '```'
             grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
             echo '```'
-            echo "EKS clusters take 15–20 minutes to create. Aurora takes 5–10 minutes."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tfplan-workload-${{ inputs.target }}-${{ github.run_id }}
+          name: tfplan-workload-${{ needs.vars.outputs.target }}-${{ github.run_id }}
           path: |
-            workloads/eaf/${{ inputs.target }}/tfplan
-            workloads/eaf/${{ inputs.target }}/plan.txt
+            workloads/eaf/${{ needs.vars.outputs.target }}/tfplan
+            workloads/eaf/${{ needs.vars.outputs.target }}/plan.txt
           retention-days: 5
 
   scan-images:
     name: scan open-source images
-    needs: plan
+    needs: [vars, plan]
     if: needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -136,15 +154,15 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           scanners: vuln
-          exit-code: 1   # block deploy if fixable CRITICAL/HIGH found in open-source image
+          exit-code: 1
 
-      - name: generate SARIF for ${{ matrix.image }}
+      - name: generate SARIF
         uses: aquasecurity/trivy-action@master
         if: always()
         with:
           image-ref: ${{ matrix.image }}
           format: sarif
-          output: trivy-${{ matrix.image == 'searxng/searxng:latest' && 'searxng' || matrix.image == 'unclecode/crawl4ai:latest' && 'crawl4ai' || 'qdrant' }}.sarif
+          output: trivy-result.sarif
           scanners: vuln
           exit-code: 0
 
@@ -152,18 +170,17 @@ jobs:
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-${{ matrix.image == 'searxng/searxng:latest' && 'searxng' || matrix.image == 'unclecode/crawl4ai:latest' && 'crawl4ai' || 'qdrant' }}.sarif
+          sarif_file: trivy-result.sarif
 
   apply-dev:
-    name: apply (dev — no gate)
-    needs: [plan, scan-images]
-    if: needs.plan.outputs.has_changes == 'true' && inputs.target == 'dev'
+    name: apply (dev)
+    needs: [vars, plan, scan-images]
+    if: needs.plan.outputs.has_changes == 'true' && needs.vars.outputs.is_dev == 'true'
     runs-on: ubuntu-latest
     environment: dev
     concurrency:
       group: apply-workload-dev
       cancel-in-progress: false
-
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -197,14 +214,13 @@ jobs:
 
   apply-prod:
     name: apply (prod — approval required)
-    needs: [plan, scan-images]
-    if: needs.plan.outputs.has_changes == 'true' && inputs.target == 'prod'
+    needs: [vars, plan, scan-images]
+    if: needs.plan.outputs.has_changes == 'true' && needs.vars.outputs.is_dev == 'false'
     runs-on: ubuntu-latest
     environment: prod
     concurrency:
       group: apply-workload-prod
       cancel-in-progress: false
-
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -236,10 +252,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  no_changes:
+  nothing-to-apply:
     name: nothing to apply
-    needs: plan
+    needs: [vars, plan]
     if: needs.plan.outputs.has_changes == 'false'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "### ${{ inputs.target }} workload has no changes" >> "$GITHUB_STEP_SUMMARY"
+      - run: echo "### ${{ needs.vars.outputs.target }}: no changes" >> "$GITHUB_STEP_SUMMARY"
