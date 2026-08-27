@@ -1,0 +1,154 @@
+# DEPLOY FOUNDATION — applies bootstrap/seed.
+#
+# Creates and manages the pipeline's own foundation:
+#   IAM roles (plan role, apply role, store-email role, baseline roles)
+#   GitHub OIDC provider
+#   S3 state bucket
+#
+# Run this when you change bootstrap/seed Terraform.
+# This workflow uses the management environment approval gate.
+
+name: deploy-foundation
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "apply" to confirm'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: 1.13.3
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check confirmation
+        run: |
+          if [[ "${{ inputs.confirm }}" != "apply" ]]; then
+            echo "type the word apply in the confirm field to proceed" >&2
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-foundation-plan-${{ github.run_id }}
+
+      - name: verify account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2; exit 1
+          fi
+
+      - name: plan
+        id: plan
+        working-directory: bootstrap/seed
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+
+          set +e
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -out=tfplan \
+            -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
+            -detailed-exitcode \
+            | tee plan.txt
+          code=${PIPESTATUS[0]}
+          set -e
+
+          if ! grep -qE '^(Plan: |No changes)' plan.txt; then
+            echo "no plan summary found — do not trust this run" >&2; exit 1
+          fi
+
+          case "$code" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "plan failed with exit code $code" >&2; exit "$code" ;;
+          esac
+
+      - name: summary
+        if: always()
+        working-directory: bootstrap/seed
+        run: |
+          {
+            echo "## Foundation plan"
+            echo '```'
+            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-seed-${{ github.run_id }}
+          path: bootstrap/seed/tfplan
+          retention-days: 5
+
+  deploy:
+    name: deploy
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment: management
+    concurrency:
+      group: deploy-foundation
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-seed-${{ github.run_id }}
+          path: bootstrap/seed
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BOOTSTRAP_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-foundation-deploy-${{ github.run_id }}
+      - name: verify account
+        run: |
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2; exit 1
+          fi
+      - name: deploy
+        working-directory: bootstrap/seed
+        run: |
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform apply -no-color -input=false -lock-timeout=5m tfplan
+      - name: outputs
+        working-directory: bootstrap/seed
+        run: |
+          { echo "## Foundation deployed"; echo '```'; terraform output -no-color; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  no_changes:
+    name: nothing to deploy
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "### Foundation has no changes" >> "$GITHUB_STEP_SUMMARY"

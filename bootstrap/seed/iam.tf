@@ -232,6 +232,32 @@ resource "aws_iam_role_policy" "bootstrap_plan_state_lock" {
   policy = data.aws_iam_policy_document.bootstrap_plan_state_lock.json
 }
 
+# The plan role needs to assume OrganizationAccountAccessRole in member accounts
+# so Terraform can plan the per-account baseline layers.
+#
+# Scoped to the role NAME only — any account in the organization. This is the
+# least-privilege form available because member account IDs are not known at
+# the time this policy is written (they are created by the org-structure layer
+# after seed runs). ReadOnlyAccess alone does not include sts:AssumeRole.
+data "aws_iam_policy_document" "bootstrap_plan_member_assume" {
+  statement {
+    sid    = "AssumeOrganizationAccountAccessRole"
+    effect = "Allow"
+    actions = [
+      "sts:AssumeRole",
+    ]
+    resources = [
+      "arn:${local.partition}:iam::*:role/OrganizationAccountAccessRole",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "bootstrap_plan_member_assume" {
+  name   = "assume-organization-account-access-role"
+  role   = aws_iam_role.bootstrap_plan.id
+  policy = data.aws_iam_policy_document.bootstrap_plan_member_assume.json
+}
+
 # --------------------------------------------------------------------------
 # APPLY ROLE — AdministratorAccess, reachable only through the approval gate.
 # --------------------------------------------------------------------------
@@ -393,4 +419,211 @@ resource "aws_iam_role_policy" "account_request" {
   name   = "write-account-emails"
   role   = aws_iam_role.account_request.id
   policy = data.aws_iam_policy_document.account_request.json
+}
+# Control Tower read permissions for the plan role.
+#
+# ReadOnlyAccess does not include newer Control Tower Baselines API actions.
+# Once a CT baseline exists in state, Terraform refreshes it on every plan —
+# which calls GetEnabledBaseline. Without this, the second account's plan fails
+# with AccessDenied even though the first account's plan succeeded (no baseline
+# in state yet to refresh).
+data "aws_iam_policy_document" "bootstrap_plan_controltower" {
+  statement {
+    sid    = "ControlTowerRead"
+    effect = "Allow"
+    actions = [
+      "controltower:Get*",
+      "controltower:List*",
+      "controltower:Describe*",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "bootstrap_plan_controltower" {
+  name   = "controltower-read"
+  role   = aws_iam_role.bootstrap_plan.id
+  policy = data.aws_iam_policy_document.bootstrap_plan_controltower.json
+}
+
+# --------------------------------------------------------------------------
+# BASELINE DEPLOY ROLES — one per environment (dev, prod)
+# --------------------------------------------------------------------------
+#
+# The apply-baseline workflow uses these roles to apply the per-account
+# baseline inside EAF-DEV and EAF-PROD. Each role:
+#   - trusts only its own GitHub Environment (dev or prod)
+#   - can only assume OrganizationAccountAccessRole in member accounts
+#   - has no permissions in the management account
+#
+# GitHub Environments handle the approval gate:
+#   dev   no reviewers configured → applies automatically
+#   prod  reviewer required       → applies after approval
+#
+# The wildcard on resources is necessary because member account IDs are
+# created by the org-structure layer (which runs after seed). They are not
+# known when this policy is written.
+
+locals {
+  github_sub_baseline_dev  = "${local.github_sub_prefix}:environment:dev"
+  github_sub_baseline_prod = "${local.github_sub_prefix}:environment:prod"
+}
+
+# ── dev baseline role ─────────────────────────────────────────────────────
+data "aws_iam_policy_document" "baseline_dev_trust" {
+  statement {
+    sid     = "GitHubActionsDevEnvironment"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.github_oidc_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [local.github_sub_baseline_dev]
+    }
+  }
+}
+
+resource "aws_iam_role" "baseline_dev" {
+  name        = "${var.org_prefix}-baseline-dev-role"
+  description = "Assumed by apply-baseline to deploy into EAF-DEV. No management account permissions."
+
+  assume_role_policy   = data.aws_iam_policy_document.baseline_dev_trust.json
+  max_session_duration = 7200
+}
+
+data "aws_iam_policy_document" "baseline_dev_policy" {
+  statement {
+    sid     = "AssumeIntoMemberAccounts"
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    resources = [
+      "arn:${local.partition}:iam::*:role/OrganizationAccountAccessRole",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "baseline_dev" {
+  name   = "assume-organization-account-access-role"
+  role   = aws_iam_role.baseline_dev.id
+  policy = data.aws_iam_policy_document.baseline_dev_policy.json
+}
+
+# Terraform backend: the baseline roles need to read/write their own state
+# file in the management account's S3 bucket.
+data "aws_iam_policy_document" "baseline_dev_state" {
+  statement {
+    sid    = "ReadWriteDevState"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/accounts/dev/*",
+      "${aws_s3_bucket.state.arn}/workloads/dev/*",
+    ]
+  }
+  statement {
+    sid    = "DevStateLock"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.state.arn}/accounts/dev/*.tflock",
+      "${aws_s3_bucket.state.arn}/workloads/dev/*.tflock",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "baseline_dev_state" {
+  name   = "state-read-write"
+  role   = aws_iam_role.baseline_dev.id
+  policy = data.aws_iam_policy_document.baseline_dev_state.json
+}
+
+# ── prod baseline role ────────────────────────────────────────────────────
+data "aws_iam_policy_document" "baseline_prod_trust" {
+  statement {
+    sid     = "GitHubActionsProdEnvironment"
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.github_oidc_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [local.github_sub_baseline_prod]
+    }
+  }
+}
+
+resource "aws_iam_role" "baseline_prod" {
+  name        = "${var.org_prefix}-baseline-prod-role"
+  description = "Assumed by apply-baseline to deploy into EAF-PROD. No management account permissions."
+
+  assume_role_policy   = data.aws_iam_policy_document.baseline_prod_trust.json
+  max_session_duration = 7200
+}
+
+resource "aws_iam_role_policy" "baseline_prod" {
+  name   = "assume-organization-account-access-role"
+  role   = aws_iam_role.baseline_prod.id
+  policy = data.aws_iam_policy_document.baseline_dev_policy.json
+}
+
+data "aws_iam_policy_document" "baseline_prod_state" {
+  statement {
+    sid    = "ReadWriteProdState"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/accounts/prod/*",
+    ]
+  }
+  statement {
+    sid    = "ProdStateLock"
+    effect = "Allow"
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject",
+    ]
+    resources = ["${aws_s3_bucket.state.arn}/accounts/prod/*.tflock"]
+  }
+}
+
+resource "aws_iam_role_policy" "baseline_prod_state" {
+  name   = "state-read-write"
+  role   = aws_iam_role.baseline_prod.id
+  policy = data.aws_iam_policy_document.baseline_prod_state.json
 }

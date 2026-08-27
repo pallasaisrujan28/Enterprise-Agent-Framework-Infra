@@ -1,0 +1,78 @@
+terraform {
+  required_version = ">= 1.11"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+  }
+
+  backend "s3" {}
+}
+
+# Default provider — assumes into EAF-DEV via the cross-account role AWS
+# creates automatically in every member account.
+provider "aws" {
+  region = var.region
+
+  assume_role {
+    role_arn     = "arn:aws:iam::${var.account_id}:role/OrganizationAccountAccessRole"
+    session_name = "eaf-workloads-dev"
+  }
+}
+
+# Data sources resolved in the context of EAF-DEV.
+data "aws_partition" "current" {}
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# Helm provider — deploys Langfuse and its prerequisites into the EKS cluster.
+provider "helm" {
+  kubernetes {
+    host                   = aws_eks_cluster.this.endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args = [
+        "eks", "get-token",
+        "--cluster-name", aws_eks_cluster.this.name,
+        "--region", var.region,
+      ]
+    }
+  }
+}
+
+# Kubernetes provider — creates Deployments, Services, ConfigMaps for
+# SearXNG and Crawl4AI (tools that have no official Helm charts).
+provider "kubernetes" {
+  host                   = aws_eks_cluster.this.endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args = [
+      "eks", "get-token",
+      "--cluster-name", aws_eks_cluster.this.name,
+      "--region", var.region,
+    ]
+  }
+}
