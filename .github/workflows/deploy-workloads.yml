@@ -1,26 +1,15 @@
-name: Apply — EKS workload
-# Applies workloads/eaf/dev or workloads/eaf/prod into EAF-DEV / EAF-PROD.
-#
-# Triggers:
-#   push to main touching workloads/eaf/dev/**  → auto-applies dev (no gate)
-#   workflow_dispatch target=dev                 → manual dev apply
-#   workflow_dispatch target=prod                → manual prod apply (approval gate)
-#
-# Why auto-apply dev:
-#   Dev is disposable. SCP guardrails + immutable OIDC trust are the blast-radius
-#   controls. A broken dev apply can be reverted or reapplied immediately.
-#   Prod always requires a human in the loop.
+name: Deploy workloads
+run-name: "Deploy ${{ github.event_name == 'push' && 'dev (auto)' || inputs.target }} by @${{ github.actor }}"
 
 on:
   push:
     branches: [main]
     paths:
       - "workloads/eaf/dev/**"
-
   workflow_dispatch:
     inputs:
       target:
-        description: "Which environment to apply"
+        description: "Environment to deploy"
         required: true
         type: choice
         options:
@@ -40,9 +29,8 @@ env:
   TF_IN_AUTOMATION: "true"
 
 jobs:
-  # Resolve target and confirm from either push context or manual inputs
   vars:
-    name: resolve vars
+    name: resolve target
     runs-on: ubuntu-latest
     outputs:
       target: ${{ steps.set.outputs.target }}
@@ -51,13 +39,12 @@ jobs:
       - id: set
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            # Auto-triggered by push to main — always dev, no confirmation needed
             echo "target=dev" >> "$GITHUB_OUTPUT"
             echo "is_dev=true" >> "$GITHUB_OUTPUT"
           else
-            # Manual dispatch — validate confirmation
             if [[ "${{ inputs.confirm }}" != "apply" ]]; then
-              echo "type the word apply in the confirm field to proceed" >&2; exit 1
+              echo "type 'apply' in the confirm field to proceed" >&2
+              exit 1
             fi
             echo "target=${{ inputs.target }}" >> "$GITHUB_OUTPUT"
             echo "is_dev=${{ inputs.target == 'dev' }}" >> "$GITHUB_OUTPUT"
@@ -89,23 +76,16 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
-
           set +e
           terraform plan -no-color -input=false -lock-timeout=10m \
-            -out=tfplan \
-            -detailed-exitcode \
-            | tee plan.txt
+            -out=tfplan -detailed-exitcode | tee plan.txt
           code=${PIPESTATUS[0]}
           set -e
-
-          if ! grep -qE '^(Plan: |No changes)' plan.txt; then
-            echo "no plan summary found — do not trust this run" >&2; exit 1
-          fi
-
+          grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
           case "$code" in
             0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
-            2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
-            *) echo "plan failed with exit code $code" >&2; exit "$code" ;;
+            2) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
           esac
 
       - name: summary
@@ -113,7 +93,7 @@ jobs:
         working-directory: workloads/eaf/${{ needs.vars.outputs.target }}
         run: |
           {
-            echo "## ${{ needs.vars.outputs.target }} workload plan"
+            echo "## ${{ needs.vars.outputs.target }} plan"
             echo '```'
             grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
             echo '```'
@@ -128,7 +108,7 @@ jobs:
           retention-days: 5
 
   scan-images:
-    name: scan open-source images
+    name: scan tool images
     needs: [vars, plan]
     if: needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
@@ -146,7 +126,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: scan ${{ matrix.image }} with trivy
+      - name: scan ${{ matrix.image }}
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ matrix.image }}
@@ -173,7 +153,7 @@ jobs:
           sarif_file: trivy-result.sarif
 
   apply-dev:
-    name: apply (dev)
+    name: apply dev
     needs: [vars, plan, scan-images]
     if: needs.plan.outputs.has_changes == 'true' && needs.vars.outputs.is_dev == 'true'
     runs-on: ubuntu-latest
@@ -202,18 +182,18 @@ jobs:
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
           terraform apply -no-color -input=false -lock-timeout=30m tfplan
-      - name: outputs
+      - name: summary
         working-directory: workloads/eaf/dev
         run: |
           {
-            echo "## dev workload applied"
+            echo "## dev applied"
             echo '```'
             terraform output -no-color
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
   apply-prod:
-    name: apply (prod — approval required)
+    name: apply prod
     needs: [vars, plan, scan-images]
     if: needs.plan.outputs.has_changes == 'true' && needs.vars.outputs.is_dev == 'false'
     runs-on: ubuntu-latest
@@ -242,20 +222,21 @@ jobs:
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
           terraform apply -no-color -input=false -lock-timeout=30m tfplan
-      - name: outputs
+      - name: summary
         working-directory: workloads/prod
         run: |
           {
-            echo "## prod workload applied"
+            echo "## prod applied"
             echo '```'
             terraform output -no-color
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  nothing-to-apply:
-    name: nothing to apply
+  no-changes:
+    name: no changes
     needs: [vars, plan]
     if: needs.plan.outputs.has_changes == 'false'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "### ${{ needs.vars.outputs.target }}: no changes" >> "$GITHUB_STEP_SUMMARY"
+      - run: |
+            echo "### ${{ needs.vars.outputs.target }}: no changes" >> "$GITHUB_STEP_SUMMARY"
