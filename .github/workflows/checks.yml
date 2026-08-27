@@ -1,50 +1,46 @@
-name: Checks — fmt, lint, validate
-# Static checks. NO AWS CREDENTIALS.
+name: Checks and plan
+# Runs on every push. Two concerns in one workflow:
 #
-# Deliberately credential-free so it runs on every push with nothing to leak and
-# nothing to configure. `terraform init -backend=false` skips the S3 backend, which
-# is what makes validate possible without touching AWS.
+#   checks — fmt, lint, validate, register schema. No credentials. Always fast.
+#   plan   — terraform plan against real AWS. Only when infra files change.
 #
-# Jobs:
-#   static          terraform fmt + validate across all modules
-#   tflint          linting
-#   validate-register  accounts/register.yaml schema check (no credentials needed)
-#
-# What this CANNOT catch: anything that depends on real values. A nonexistent IAM
-# action, a wrong Control Tower baseline version, a policy that is too long. Those
-# need the plan workflow.
-
+# The plan is the review artefact: when a PR touches bootstrap/** or workloads/**,
+# the plan output is already visible before the reviewer clicks merge.
 
 on:
   push:
     branches: ["**"]
-  pull_request:
   workflow_dispatch:
+  # pull_request is intentionally absent: the plan job uses OIDC which only works
+  # on push events (sub: repo:...ref:refs/heads/*). Pull request events emit a
+  # different sub (repo:...:pull_request) that the plan role trust policy rejects.
 
 permissions:
+  id-token: write
   contents: read
 
 concurrency:
-  # Supersede an in-flight run for the same ref. A stale check result is worse than
-  # no result, because it reads as current.
   group: checks-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  TF_VERSION: 1.13.3
+  TF_IN_AUTOMATION: "true"
+
 jobs:
+  # ── 1. Static checks — no credentials, always runs ────────────────────────
+
   static:
+    name: static
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.13.3
-          # No wrapper. It rewrites stdout, which breaks anything that greps the
-          # output — and a grep that silently matches nothing reports success.
+          terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      # Same commands as `make fmt-check` and `make validate` — Makefile is the
-      # single source of truth. Run `make fmt` locally to auto-fix before committing.
       - name: fmt check
         run: make fmt-check
 
@@ -60,7 +56,6 @@ jobs:
         with:
           tflint_version: v0.59.1
 
-      # Same command as `make lint` — Makefile is the single source of truth.
       - name: lint
         run: make lint
 
@@ -74,6 +69,121 @@ jobs:
         run: |
           set -euo pipefail
           pip install --quiet pyyaml
-          # scripts/validate_register.py is the single source of truth for what a
-          # valid register entry looks like. Add new rules there, not here.
           python3 scripts/validate_register.py accounts/register.yaml
+
+  # ── 2. Detect whether terraform-relevant files changed ────────────────────
+
+  detect-changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      terraform: ${{ steps.check.outputs.terraform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: check
+        run: |
+          set -euo pipefail
+          # workflow_dispatch always plans; pull_request events are not in the
+          # triggers so this only runs for push. Leave the guard for safety.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "terraform=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          before="${{ github.event.before }}"
+          # New branch — compare against default branch instead of assuming changed
+          if [[ "$before" == "0000000000000000000000000000000000000000" ]]; then
+            base=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+            if [[ -n "$base" ]] && git diff --name-only "$base" "${{ github.sha }}" \
+                 | grep -qE '^(bootstrap|accounts|workloads|scripts)/'; then
+              echo "terraform=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "terraform=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+          if git diff --name-only "$before" "${{ github.sha }}" \
+               | grep -qE '^(bootstrap|accounts|workloads|scripts)/'; then
+            echo "terraform=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "terraform=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── 3. Terraform plan — needs AWS credentials ──────────────────────────────
+
+  plan:
+    name: plan
+    needs: [static, tflint, validate-register, detect-changes]
+    if: needs.detect-changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-ci-plan-${{ github.run_id }}
+
+      - name: verify account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual, expected management account" >&2
+            exit 1
+          fi
+
+      - name: plan seed
+        working-directory: bootstrap/seed
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
+            | tee plan.txt
+          grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary found" >&2; exit 1; }
+
+      - name: plan org-structure
+        working-directory: bootstrap/org-structure
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -out=tfplan \
+            -var="management_account_id=${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" \
+            | tee plan.txt
+          grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary found" >&2; exit 1; }
+          terraform show -json tfplan > plan.json
+
+      - name: validate SCP
+        run: bash scripts/check-policies.sh bootstrap/org-structure/plan.json policy-out
+
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "## Plan"
+            echo "### seed"
+            echo '```'
+            grep -E '^(Plan: |No changes)' bootstrap/seed/plan.txt || echo "did not complete"
+            echo '```'
+            echo "### accounts"
+            echo '```'
+            grep -E '^(Plan: |No changes)' bootstrap/org-structure/plan.txt || echo "did not complete"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: |
+            bootstrap/org-structure/tfplan
+            bootstrap/org-structure/plan.txt
+          retention-days: 5
