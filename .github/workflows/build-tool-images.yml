@@ -54,6 +54,13 @@ jobs:
         id: meta
         run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
+      - name: login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: build
         run: |
           docker build \
