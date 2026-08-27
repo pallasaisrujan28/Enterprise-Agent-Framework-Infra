@@ -66,7 +66,7 @@ jobs:
 
       - name: plan
         id: plan
-        working-directory: workloads/${{ inputs.target }}
+        working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
@@ -91,7 +91,7 @@ jobs:
 
       - name: summary
         if: always()
-        working-directory: workloads/${{ inputs.target }}
+        working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           {
             echo "## ${{ inputs.target }} workload plan"
@@ -105,8 +105,8 @@ jobs:
         with:
           name: tfplan-workload-${{ inputs.target }}-${{ github.run_id }}
           path: |
-            workloads/${{ inputs.target }}/tfplan
-            workloads/${{ inputs.target }}/plan.txt
+            workloads/eaf/${{ inputs.target }}/tfplan
+            workloads/eaf/${{ inputs.target }}/plan.txt
           retention-days: 5
 
   scan-images:
