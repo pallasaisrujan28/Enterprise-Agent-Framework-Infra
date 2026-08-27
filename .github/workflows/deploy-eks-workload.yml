@@ -122,7 +122,8 @@ jobs:
       matrix:
         image:
           - searxng/searxng:latest
-          - unclecode/crawl4ai:latest
+          - ghcr.io/mendableai/firecrawl:latest
+          - ghcr.io/mendableai/firecrawl-playwright-service:latest
           - qdrant/qdrant:latest
     steps:
       - uses: actions/checkout@v4
