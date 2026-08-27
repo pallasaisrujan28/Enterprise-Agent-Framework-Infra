@@ -1,4 +1,4 @@
-run-name: Apply — EKS workload
+name: Apply — EKS workload
 # Applies workloads/eaf/dev or workloads/eaf/prod into EAF-DEV / EAF-PROD.
 #
 # Triggers:
