@@ -1,4 +1,4 @@
-name: Deploy — security baseline
+name: Apply — security baseline
 # APPLY BASELINE — deploys the per-account baseline into EAF-DEV or EAF-PROD.
 #
 # Run this AFTER the account exists and Control Tower has finished enrolling it.
