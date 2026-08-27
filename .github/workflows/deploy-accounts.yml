@@ -1,4 +1,4 @@
-name: deploy-accounts
+name: Deploy — accounts
 # Applies bootstrap/org-structure: OUs, SCPs, Control Tower enrollment, member accounts.
 # Run this after merging an accounts/register.yaml change.
 # Account creation is permanent. Read the plan before approving.

@@ -1,3 +1,4 @@
+name: Checks — fmt, lint, validate
 # Static checks. NO AWS CREDENTIALS.
 #
 # Deliberately credential-free so it runs on every push with nothing to leak and
@@ -13,7 +14,6 @@
 # action, a wrong Control Tower baseline version, a policy that is too long. Those
 # need the plan workflow.
 
-name: checks
 
 on:
   push:

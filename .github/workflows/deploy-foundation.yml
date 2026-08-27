@@ -1,3 +1,4 @@
+name: Deploy — foundation (bootstrap/seed)
 # DEPLOY FOUNDATION — applies bootstrap/seed.
 #
 # Creates and manages the pipeline's own foundation:
@@ -8,7 +9,6 @@
 # Run this when you change bootstrap/seed Terraform.
 # This workflow uses the management environment approval gate.
 
-name: deploy-foundation
 
 on:
   workflow_dispatch:

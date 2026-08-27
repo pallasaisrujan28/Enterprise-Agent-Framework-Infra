@@ -1,3 +1,4 @@
+name: Deploy — EKS workload
 # APPLY WORKLOAD — deploys EKS, Aurora, S3, and IAM into EAF-DEV or EAF-PROD.
 #
 # Run AFTER the account baseline is applied (GuardDuty, Security Hub, CI role).
@@ -12,7 +13,6 @@
 #   dev   no approval — disposable, SCP guardrails the risk
 #   prod  required approval
 
-name: deploy-eks-workload
 
 on:
   workflow_dispatch:
@@ -128,20 +128,20 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tfplan-workload-dev-${{ github.run_id }}
-          path: workloads/dev
+          path: workloads/eaf/dev
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-apply-dev-${{ github.run_id }}
       - name: apply
-        working-directory: workloads/dev
+        working-directory: workloads/eaf/dev
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
           terraform apply -no-color -input=false -lock-timeout=30m tfplan
       - name: outputs
-        working-directory: workloads/dev
+        working-directory: workloads/eaf/dev
         run: |
           {
             echo "## dev workload applied"

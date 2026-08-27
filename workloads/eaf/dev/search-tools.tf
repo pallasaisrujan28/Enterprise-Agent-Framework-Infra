@@ -51,7 +51,7 @@ resource "kubernetes_config_map" "searxng" {
         debug         = false
       }
       server = {
-        secret_key = random_password.searxng_secret.result
+        secret_key   = random_password.searxng_secret.result
         bind_address = "0.0.0.0"
         port         = 8080
       }
@@ -62,11 +62,11 @@ resource "kubernetes_config_map" "searxng" {
       }
       # Engines the agent will query. Kept minimal — all free, no API keys.
       engines = [
-        { name = "google",     engine = "google",     shortcut = "g" },
-        { name = "bing",       engine = "bing",       shortcut = "b" },
+        { name = "google", engine = "google", shortcut = "g" },
+        { name = "bing", engine = "bing", shortcut = "b" },
         { name = "duckduckgo", engine = "duckduckgo", shortcut = "ddg" },
-        { name = "wikipedia",  engine = "wikipedia",  shortcut = "wp" },
-        { name = "arxiv",      engine = "arxiv",      shortcut = "ar" },
+        { name = "wikipedia", engine = "wikipedia", shortcut = "wp" },
+        { name = "arxiv", engine = "arxiv", shortcut = "ar" },
       ]
     })
   }
@@ -108,7 +108,10 @@ resource "kubernetes_deployment" "searxng" {
           }
 
           liveness_probe {
-            http_get { path = "/healthz"; port = 8080 }
+            http_get {
+              path = "/healthz"
+              port = 8080
+            }
             initial_delay_seconds = 30
             period_seconds        = 30
           }
@@ -172,11 +175,14 @@ resource "kubernetes_deployment" "crawl4ai" {
           resources {
             # Playwright (Chromium) needs reasonable memory
             requests = { cpu = "250m", memory = "512Mi" }
-            limits   = { cpu = "1",    memory = "2Gi" }
+            limits   = { cpu = "1", memory = "2Gi" }
           }
 
           liveness_probe {
-            http_get { path = "/health"; port = 11235 }
+            http_get {
+              path = "/health"
+              port = 11235
+            }
             initial_delay_seconds = 60
             period_seconds        = 30
           }

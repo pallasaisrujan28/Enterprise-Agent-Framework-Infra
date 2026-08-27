@@ -1,3 +1,4 @@
+name: Deploy — security baseline
 # APPLY BASELINE — deploys the per-account baseline into EAF-DEV or EAF-PROD.
 #
 # Run this AFTER the account exists and Control Tower has finished enrolling it.
@@ -15,7 +16,6 @@
 # creates automatically in every member account and trusts the management
 # account. No additional role setup is needed in the member account.
 
-name: deploy-security-baseline
 
 on:
   workflow_dispatch:
