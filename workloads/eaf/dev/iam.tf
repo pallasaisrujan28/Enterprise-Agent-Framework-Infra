@@ -237,6 +237,7 @@ data "aws_iam_policy_document" "agent_ci_policy" {
     ]
     resources = [
       "arn:${data.aws_partition.current.partition}:ecr:${var.region}:${var.account_id}:repository/eaf/*",
+      "arn:${data.aws_partition.current.partition}:ecr:${var.region}:${var.account_id}:repository/tools/*",
     ]
   }
 

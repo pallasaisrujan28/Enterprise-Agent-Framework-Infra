@@ -88,7 +88,7 @@ resource "kubernetes_deployment" "searxng" {
       spec {
         container {
           name  = "searxng"
-          image = "searxng/searxng:latest"
+          image = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com/tools/searxng:latest"
           port { container_port = 8080 }
           env {
             name  = "SEARXNG_SETTINGS_PATH"
@@ -200,7 +200,7 @@ resource "kubernetes_deployment" "firecrawl_playwright" {
       spec {
         container {
           name  = "playwright"
-          image = "ghcr.io/mendableai/firecrawl-playwright-service:latest"
+          image = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com/tools/firecrawl-playwright:latest"
           port { container_port = 3000 }
           resources {
             requests = { cpu = "250m", memory = "512Mi" }
@@ -356,8 +356,9 @@ resource "kubernetes_deployment" "firecrawl_worker" {
 # ── Qdrant ─────────────────────────────────────────────────────────────────────
 
 resource "helm_release" "qdrant" {
-  name             = "qdrant"
-  repository       = "https://qdrant.github.io/qdrant-helm"
+  name       = "qdrant"
+  repository = "https://qdrant.github.io/qdrant-helm"
+  # image.repository is set to ECR below
   chart            = "qdrant"
   namespace        = kubernetes_namespace.tools.metadata[0].name
   create_namespace = false
