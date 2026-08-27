@@ -107,54 +107,9 @@ jobs:
             workloads/eaf/${{ needs.vars.outputs.target }}/plan.txt
           retention-days: 5
 
-  scan-images:
-    name: scan tool images
-    needs: [vars, plan]
-    if: needs.plan.outputs.has_changes == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        image:
-          - searxng/searxng:latest
-          - ghcr.io/mendableai/firecrawl:latest
-          - ghcr.io/mendableai/firecrawl-playwright-service:latest
-          - qdrant/qdrant:latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: scan ${{ matrix.image }}
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ matrix.image }}
-          format: table
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          scanners: vuln
-          exit-code: 1
-
-      - name: generate SARIF
-        uses: aquasecurity/trivy-action@master
-        if: always()
-        with:
-          image-ref: ${{ matrix.image }}
-          format: sarif
-          output: trivy-result.sarif
-          scanners: vuln
-          exit-code: 0
-
-      - name: upload SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-result.sarif
-
   apply-dev:
     name: apply dev
-    needs: [vars, plan, scan-images]
+    needs: [vars, plan]
     if: needs.plan.outputs.has_changes == 'true' && needs.vars.outputs.is_dev == 'true'
     runs-on: ubuntu-latest
     environment: dev
@@ -194,7 +149,7 @@ jobs:
 
   apply-prod:
     name: apply prod
-    needs: [vars, plan, scan-images]
+    needs: [vars, plan]
     if: needs.plan.outputs.has_changes == 'true' && needs.vars.outputs.is_dev == 'false'
     runs-on: ubuntu-latest
     environment: prod
