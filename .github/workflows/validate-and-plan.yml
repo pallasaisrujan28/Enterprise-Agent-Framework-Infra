@@ -1,3 +1,4 @@
+name: Validate and plan
 # CI — runs on every push to every branch.
 #
 # Two jobs:
@@ -7,7 +8,6 @@
 # The plan result is the review artefact: when you open a PR the plan is
 # already visible, so the reviewer reads "1 to add" before they click merge.
 
-name: validate-and-plan
 
 on:
   push:

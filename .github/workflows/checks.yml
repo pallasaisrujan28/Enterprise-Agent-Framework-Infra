@@ -1,0 +1,79 @@
+name: Checks — fmt, lint, validate
+# Static checks. NO AWS CREDENTIALS.
+#
+# Deliberately credential-free so it runs on every push with nothing to leak and
+# nothing to configure. `terraform init -backend=false` skips the S3 backend, which
+# is what makes validate possible without touching AWS.
+#
+# Jobs:
+#   static          terraform fmt + validate across all modules
+#   tflint          linting
+#   validate-register  accounts/register.yaml schema check (no credentials needed)
+#
+# What this CANNOT catch: anything that depends on real values. A nonexistent IAM
+# action, a wrong Control Tower baseline version, a policy that is too long. Those
+# need the plan workflow.
+
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede an in-flight run for the same ref. A stale check result is worse than
+  # no result, because it reads as current.
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.3
+          # No wrapper. It rewrites stdout, which breaks anything that greps the
+          # output — and a grep that silently matches nothing reports success.
+          terraform_wrapper: false
+
+      # Same commands as `make fmt-check` and `make validate` — Makefile is the
+      # single source of truth. Run `make fmt` locally to auto-fix before committing.
+      - name: fmt check
+        run: make fmt-check
+
+      - name: validate
+        run: make validate
+
+  tflint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.59.1
+
+      # Same command as `make lint` — Makefile is the single source of truth.
+      - name: lint
+        run: make lint
+
+  validate-register:
+    name: validate register
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: validate accounts/register.yaml
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          # scripts/validate_register.py is the single source of truth for what a
+          # valid register entry looks like. Add new rules there, not here.
+          python3 scripts/validate_register.py accounts/register.yaml

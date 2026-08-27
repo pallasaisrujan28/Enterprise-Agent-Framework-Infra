@@ -294,3 +294,47 @@ proceeding.
 The user will ask questions. Those questions are the right ones. The answers
 to "why?" and "what does this leave open?" are more important than the speed
 of fixing the error.
+
+---
+
+## Development workflow rules
+
+### Run `make check` before every commit
+
+Before committing any change — Terraform, YAML, scripts — run:
+
+```bash
+make check     # fmt-check + lint (same commands CI runs)
+```
+
+If it fails, fix before committing:
+```bash
+make fmt       # auto-fix terraform formatting
+make lint      # see what tflint flags
+```
+
+The pre-push hook (`.githooks/pre-push`) also runs this automatically.
+Install it once with `make install-hooks`.
+
+The principle: **CI should never see a failure that a local check would have caught.**
+A red CI pipeline is expensive — it blocks the branch, wastes pipeline time, and
+creates fix commits that clutter the PR history.
+
+### One feature per branch — keep PRs small and reviewable
+
+Each branch must contain exactly one logical change.
+
+**Good:**
+- Add `agentcore-gateway.tf` (one new Terraform file)
+- Fix `terraform fmt` alignment in `search-tools.tf`
+- Update `checks.yml` to use `make fmt-check`
+
+**Not good:**
+- Add AgentCore Gateway + Cognito + IAM + SSM + security group all in one PR
+- Refactor variables AND add new resources AND update workflows
+
+A PR that touches more than 3–4 files is almost always more than one feature.
+Split it. Smaller PRs are reviewed faster, easier to revert, and create a
+cleaner git history.
+
+The goal: **a reviewer should be able to understand the full change in 5 minutes.**
