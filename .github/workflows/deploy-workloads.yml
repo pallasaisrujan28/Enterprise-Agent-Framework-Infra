@@ -4,8 +4,9 @@ run-name: "Deploy ${{ github.event_name == 'push' && 'dev (auto)' || inputs.targ
 on:
   push:
     branches: [main]
-    paths:
-      - "workloads/eaf/dev/**"
+  # No path filter — triggers on every push to main.
+  # The plan step detects if Terraform files changed. If nothing changed,
+  # has_changes=false and apply is skipped automatically. Safe to run always.
   workflow_dispatch:
     inputs:
       target:
