@@ -29,7 +29,18 @@ validate:
 
 # ── Combined (mirrors CI exactly) ─────────────────────────────────────────────
 
-check: fmt-check lint
+validate-yaml:
+	python3 -c "
+	import yaml, sys, glob
+	errors = []
+	for f in glob.glob('.github/workflows/*.yml'):
+	    try: yaml.safe_load(open(f).read())
+	    except yaml.YAMLError as e: errors.append(f'{f}: {e}')
+	if errors: [print(e) for e in errors]; sys.exit(1)
+	print('All workflow YAML files valid')
+	"
+
+check: fmt-check lint validate-yaml
 
 # ── Git hooks ─────────────────────────────────────────────────────────────────
 

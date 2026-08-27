@@ -41,6 +41,9 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      - name: validate workflow YAML
+        run: make validate-yaml
+
       - name: fmt check
         run: make fmt-check
 
