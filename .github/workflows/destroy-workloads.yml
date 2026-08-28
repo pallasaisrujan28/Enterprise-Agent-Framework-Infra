@@ -1,0 +1,57 @@
+name: Destroy workloads
+run-name: "Destroy ${{ inputs.target }} by @${{ github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to destroy"
+        required: true
+        type: choice
+        options:
+          - dev
+      confirm:
+        description: 'Type "destroy" to confirm permanent deletion'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: 1.13.3
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  destroy:
+    name: destroy ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check confirmation
+        run: |
+          if [[ "${{ inputs.confirm }}" != "destroy" ]]; then
+            echo "type 'destroy' in the confirm field to proceed" >&2
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-workload-destroy-${{ github.run_id }}
+
+      - name: destroy
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform destroy -no-color -input=false -lock-timeout=30m -auto-approve
