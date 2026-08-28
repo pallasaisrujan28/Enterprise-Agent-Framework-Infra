@@ -37,7 +37,7 @@ resource "kubernetes_namespace" "tools" {
       ManagedBy = "terraform"
     }
   }
-  depends_on = [aws_eks_node_group.default]
+  depends_on = [aws_eks_node_group.default, aws_eks_access_policy_association.org_role_admin]
 }
 
 # ── SearXNG ────────────────────────────────────────────────────────────────────
