@@ -56,6 +56,7 @@ provider "helm" {
         "eks", "get-token",
         "--cluster-name", aws_eks_cluster.this.name,
         "--region", var.region,
+        "--role-arn", "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole",
       ]
     }
   }
@@ -73,6 +74,7 @@ provider "kubernetes" {
       "eks", "get-token",
       "--cluster-name", aws_eks_cluster.this.name,
       "--region", var.region,
+      "--role-arn", "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole",
     ]
   }
 }
