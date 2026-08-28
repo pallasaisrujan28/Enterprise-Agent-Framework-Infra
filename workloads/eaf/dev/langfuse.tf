@@ -48,7 +48,7 @@ resource "helm_release" "cert_manager" {
     value = "true"
   }
 
-  depends_on = [aws_eks_node_group.langfuse]
+  depends_on = [aws_eks_node_group.langfuse, aws_eks_access_policy_association.org_role_admin]
 }
 
 # ── Step 2: ClickHouse Kubernetes Operator ─────────────────────────────────────
