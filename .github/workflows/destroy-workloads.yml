@@ -49,9 +49,24 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-destroy-${{ github.run_id }}
 
-      - name: destroy
+      - name: init
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: terraform init -input=false -no-color -backend-config=backend.hcl
+
+      - name: drop k8s and helm resources from state
         working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           set -euo pipefail
-          terraform init -input=false -no-color -backend-config=backend.hcl
+          # The Kubernetes provider stores null identity for resources created during
+          # a partial apply. Those null identities block refresh, plan, and destroy.
+          # Removing them from state is safe: Kubernetes resources are deleted
+          # automatically when the EKS cluster is destroyed.
+          terraform state list 2>/dev/null \
+            | grep -E '^(kubernetes_|helm_release\.)' \
+            | xargs -r terraform state rm
+
+      - name: destroy aws resources
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: |
+          set -euo pipefail
           terraform destroy -no-color -input=false -lock-timeout=30m -auto-approve
