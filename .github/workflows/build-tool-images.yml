@@ -1,0 +1,112 @@
+name: Build and push tool images
+# Builds EAF-owned versions of every open-source tool image.
+# Pattern: upstream image + apt/apk upgrade → ECR → Kubernetes uses ECR only.
+#
+# Why own the images:
+#   - Apply OS security patches immediately (don't wait for upstream)
+#   - Pull from eu-west-2 ECR, never from Docker Hub or ghcr.io in production
+#   - Audit trail: every image tagged by commit SHA + Trivy result in Security tab
+#   - No Docker Hub rate limits in EKS
+#
+# Triggers:
+#   push to any branch touching images/**  — build + scan (no push)
+#   push to main touching images/**        — build + scan + push to ECR
+#   workflow_dispatch                       — manual rebuild of all images
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "images/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+
+env:
+  AWS_REGION: eu-west-2
+  ECR_REGISTRY: 718438899462.dkr.ecr.eu-west-2.amazonaws.com
+  DEV_ACCOUNT_ID: "718438899462"
+
+jobs:
+  build:
+    name: build ${{ matrix.image.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: tools/qdrant
+            context: images/qdrant
+          - name: tools/searxng
+            context: images/searxng
+          - name: tools/firecrawl
+            context: images/firecrawl
+          - name: tools/firecrawl-playwright
+            context: images/firecrawl-playwright
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set image tag
+        id: meta
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build
+        run: |
+          docker build \
+            --tag ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.tag }} \
+            --tag ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:latest \
+            ${{ matrix.image.context }}
+
+      - name: scan with trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.tag }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          scanners: vuln
+          exit-code: 1
+
+      - name: generate SARIF
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.tag }}
+          format: sarif
+          output: trivy-${{ matrix.image.name == 'tools/qdrant' && 'qdrant' || matrix.image.name == 'tools/searxng' && 'searxng' || matrix.image.name == 'tools/firecrawl' && 'firecrawl' || 'firecrawl-playwright' }}.sarif
+          scanners: vuln
+          exit-code: 0
+
+      - name: upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.image.name == 'tools/qdrant' && 'qdrant' || matrix.image.name == 'tools/searxng' && 'searxng' || matrix.image.name == 'tools/firecrawl' && 'firecrawl' || 'firecrawl-playwright' }}.sarif
+
+      # Push to ECR only on main — feature branches build and scan but don't publish
+      - name: login to ECR
+        if: github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:role/eaf-agent-ci-role
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: eaf-tool-images-${{ github.run_id }}
+
+      - name: push to ECR
+        if: github.ref == 'refs/heads/main'
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.tag }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:latest
