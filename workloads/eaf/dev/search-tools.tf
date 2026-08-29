@@ -75,6 +75,7 @@ resource "kubernetes_config_map" "searxng" {
 }
 
 resource "kubernetes_deployment" "searxng" {
+  wait_for_rollout = false
   metadata {
     name      = "searxng"
     namespace = kubernetes_namespace.tools.metadata[0].name
@@ -145,6 +146,7 @@ resource "kubernetes_service" "searxng" {
 # Auth:          Authorization: Bearer <firecrawl_api_key>
 
 resource "kubernetes_deployment" "firecrawl_redis" {
+  wait_for_rollout = false
   metadata {
     name      = "firecrawl-redis"
     namespace = kubernetes_namespace.tools.metadata[0].name
@@ -187,6 +189,7 @@ resource "kubernetes_service" "firecrawl_redis" {
 }
 
 resource "kubernetes_deployment" "firecrawl_playwright" {
+  wait_for_rollout = false
   metadata {
     name      = "firecrawl-playwright"
     namespace = kubernetes_namespace.tools.metadata[0].name
@@ -249,6 +252,7 @@ locals {
 }
 
 resource "kubernetes_deployment" "firecrawl_api" {
+  wait_for_rollout = false
   metadata {
     name      = "firecrawl-api"
     namespace = kubernetes_namespace.tools.metadata[0].name
@@ -313,6 +317,7 @@ resource "kubernetes_service" "firecrawl_api" {
 }
 
 resource "kubernetes_deployment" "firecrawl_worker" {
+  wait_for_rollout = false
   metadata {
     name      = "firecrawl-worker"
     namespace = kubernetes_namespace.tools.metadata[0].name

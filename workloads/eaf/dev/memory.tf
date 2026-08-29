@@ -45,7 +45,10 @@ resource "helm_release" "neo4j" {
       server.http.enabled: "true"
       server.https.enabled: "false"
       dbms.security.auth_enabled: "false"
-      server.jvm.additional: "-XX:+ExitOnOutOfMemoryError"
+
+    jvm:
+      additionalJvmArguments:
+        - "-XX:+ExitOnOutOfMemoryError"
 
     apoc_config:
       apoc.trigger.enabled: "true"

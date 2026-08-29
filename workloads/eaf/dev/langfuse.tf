@@ -71,6 +71,7 @@ resource "helm_release" "langfuse" {
   name             = "langfuse"
   repository       = "https://langfuse.github.io/langfuse-k8s"
   chart            = "langfuse"
+  version          = "1.2.4"
   namespace        = "langfuse"
   create_namespace = true
   wait             = true
