@@ -1,6 +1,6 @@
-# SEARCH TOOLS STACK — SearXNG + Firecrawl + Neo4j (Graphiti)
+# SEARCH TOOLS STACK — SearXNG + Firecrawl
 #
-# Three components that back the agent's tool and memory stack:
+# Two components that give the agent web access:
 #
 #   SearXNG     → web search (aggregates Google, Bing, DuckDuckGo, etc.)
 #                 Internal URL: http://searxng.tools.svc.cluster.local:8080
@@ -10,14 +10,8 @@
 #                 Internal URL: http://firecrawl-api.tools.svc.cluster.local:3002
 #                 Stack: api + worker + playwright + redis
 #
-#   Neo4j       → graph database backing Graphiti temporal knowledge graph.
-#                 Graphiti (getzep/graphiti) builds self-correcting agent memory:
-#                 facts age, contradict, and update rather than accumulating stale
-#                 vectors. Requires Neo4j >= 5.x with APOC plugin.
-#                 Bolt URL: bolt://neo4j.tools.svc.cluster.local:7687
-#
-# Images: ghcr.io (Firecrawl), DockerHub (SearXNG), helm.neo4j.com (Neo4j).
-# All images are scanned by Trivy in the deploy pipeline before apply.
+# Memory (Graphiti / Neo4j) lives in memory.tf — separate concern.
+# Images are scanned by Trivy in the deploy pipeline before apply.
 
 resource "random_password" "searxng_secret" {
   length  = 32
@@ -353,67 +347,4 @@ resource "kubernetes_deployment" "firecrawl_worker" {
     kubernetes_deployment.firecrawl_playwright,
     kubernetes_deployment.firecrawl_api,
   ]
-}
-
-# ── Neo4j (Graphiti backing store) ────────────────────────────────────────────
-#
-# Graphiti (https://github.com/getzep/graphiti) builds a temporal knowledge
-# graph for self-correcting agent memory. It requires Neo4j >= 5.x with the
-# APOC plugin. The agent pod connects via bolt on port 7687.
-#
-# Internal URL: bolt://neo4j.tools.svc.cluster.local:7687
-# HTTP browser: http://neo4j.tools.svc.cluster.local:7474
-
-resource "helm_release" "neo4j" {
-  name             = "neo4j"
-  repository       = "https://helm.neo4j.com/neo4j"
-  chart            = "neo4j"
-  version          = "5.26.0"
-  namespace        = kubernetes_namespace.tools.metadata[0].name
-  create_namespace = false
-  wait             = true
-  timeout          = 600
-
-  values = [<<-EOT
-    neo4j:
-      name: eaf-memory
-      edition: community
-      password: ""
-      passwordFromSecret: ""
-
-    volumes:
-      data:
-        mode: defaultStorageClass
-        defaultStorageClass:
-          requests:
-            storage: 10Gi
-
-    resources:
-      cpu: "500m"
-      memory: "2Gi"
-
-    config:
-      server.default_listen_address: "0.0.0.0"
-      server.bolt.enabled: "true"
-      server.http.enabled: "true"
-      server.https.enabled: "false"
-      dbms.security.auth_enabled: "false"
-      server.jvm.additional: "-XX:+ExitOnOutOfMemoryError"
-      dbms.unmanaged_extension_classes: ""
-
-    apoc_config:
-      apoc.trigger.enabled: "true"
-      apoc.uuid.enabled: "true"
-
-    services:
-      neo4j:
-        spec:
-          type: ClusterIP
-
-    podSpec:
-      nodeSelector: {}
-  EOT
-  ]
-
-  depends_on = [kubernetes_namespace.tools]
 }
