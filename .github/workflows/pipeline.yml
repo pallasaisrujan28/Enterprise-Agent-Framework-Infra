@@ -93,22 +93,10 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
-          # One-time state migration: old kubernetes provider (~2.0) stored null
-          # identity in state. New provider (2.38) panics comparing null vs real.
-          # searxng: removed from config — state rm only (no import, no resource block)
-          # firecrawl_*: still in config — state rm + import to re-write identity
-          terraform state rm kubernetes_deployment.searxng 2>/dev/null || true
-          for r in \
-            "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
-            "kubernetes_deployment.firecrawl_playwright:tools/firecrawl-playwright" \
-            "kubernetes_deployment.firecrawl_api:tools/firecrawl-api" \
-            "kubernetes_deployment.firecrawl_worker:tools/firecrawl-worker"; do
-            resource="${r%%:*}"
-            id="${r##*:}"
-            terraform state rm "$resource" 2>/dev/null || true
-            terraform import -input=false "$resource" "$id" 2>/dev/null || true
-          done
-          terraform plan -no-color -input=false -lock-timeout=10m | tee plan.txt
+          # -refresh=false: plan role is read-only on state — state rm and import
+          # cannot write here. Deploy role fixes state permanently. After first
+          # successful deploy, remove -refresh=false (state is clean going forward).
+          terraform plan -no-color -input=false -lock-timeout=10m -refresh=false | tee plan.txt
           grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
 
       - name: summary
@@ -169,8 +157,21 @@ jobs:
       - name: one-time state fix — remove null-identity deployments
         working-directory: workloads/eaf/dev
         run: |
-          # One-time cleanup — remove after first successful apply.
+          # One-time state migration — deployer role has state write access.
+          # Remove this block after first successful apply.
+          # searxng removed from config — state rm only
           terraform state rm kubernetes_deployment.searxng 2>/dev/null || true
+          # firecrawl_* still in config — state rm + import to fix null identity
+          for r in \
+            "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
+            "kubernetes_deployment.firecrawl_playwright:tools/firecrawl-playwright" \
+            "kubernetes_deployment.firecrawl_api:tools/firecrawl-api" \
+            "kubernetes_deployment.firecrawl_worker:tools/firecrawl-worker"; do
+            resource="${r%%:*}"
+            id="${r##*:}"
+            terraform state rm "$resource" 2>/dev/null || true
+            terraform import -input=false "$resource" "$id" 2>/dev/null || true
+          done
 
       - name: phase 1 — EKS access policy
         working-directory: workloads/eaf/dev
