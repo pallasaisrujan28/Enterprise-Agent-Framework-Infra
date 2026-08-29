@@ -1,0 +1,252 @@
+name: EAF Pipeline
+run-name: "${{ github.ref == 'refs/heads/main' && 'deploy' || 'check' }} — ${{ github.event_name }} by @${{ github.actor }}"
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  TF_VERSION: "1.13.3"
+  TF_IN_AUTOMATION: "true"
+  ECR_REGISTRY: "718438899462.dkr.ecr.eu-west-2.amazonaws.com"
+  DEV_ACCOUNT_ID: "718438899462"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# All 4 jobs always run on every push.
+# Deploy and build-images are skipped automatically on feature branches.
+#
+#   checks → plan → deploy → build-images
+#
+#   feature branch:  checks ✓  plan ✓  deploy —  build-images —
+#   main:            checks ✓  plan ✓  deploy ✓  build-images ✓
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ── 1. checks ──────────────────────────────────────────────────────────────
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: fmt
+        run: make fmt-check
+
+      - name: validate
+        run: make validate
+
+      - name: yaml
+        run: |
+          pip install --quiet pyyaml
+          python3 -c "
+          import yaml, sys, pathlib
+          errors = []
+          for f in pathlib.Path('.github/workflows').glob('*.yml'):
+              try: yaml.safe_load(f.read_text())
+              except Exception as e: errors.append(f'{f}: {e}')
+          if errors: sys.exit('\n'.join(errors))
+          print('all workflow YAML valid')
+          "
+
+      - name: register
+        run: |
+          pip install --quiet pyyaml
+          python3 scripts/validate_register.py accounts/register.yaml
+
+  # ── 2. plan ────────────────────────────────────────────────────────────────
+  plan:
+    name: plan
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-plan-${{ github.run_id }}
+
+      - name: plan workloads/eaf/dev
+        working-directory: workloads/eaf/dev
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform plan -no-color -input=false -lock-timeout=10m | tee plan.txt
+          grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
+
+      - name: summary
+        if: always()
+        working-directory: workloads/eaf/dev
+        run: |
+          {
+            echo "## plan"
+            echo '```'
+            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 3. deploy — skipped on feature branches ────────────────────────────────
+  deploy:
+    name: deploy dev
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-deploy-${{ github.run_id }}
+
+      - name: clear stuck state lock
+        working-directory: workloads/eaf/dev
+        run: |
+          BUCKET=$(grep 'bucket' backend.hcl | awk -F'"' '{print $2}')
+          KEY=$(grep '^key' backend.hcl | awk -F'"' '{print $2}')
+          aws s3 rm "s3://${BUCKET}/${KEY}.tflock" --region eu-west-2 || true
+
+      - name: init
+        working-directory: workloads/eaf/dev
+        run: terraform init -input=false -no-color -backend-config=backend.hcl
+
+      - name: phase 1 — EKS access policy
+        working-directory: workloads/eaf/dev
+        run: |
+          # Grant OrganizationAccountAccessRole EKS cluster-admin first so
+          # the Kubernetes/Helm providers can authenticate in phase 2.
+          terraform apply -no-color -input=false -lock-timeout=10m \
+            -target=aws_eks_access_policy_association.org_role_admin \
+            -target=aws_eks_access_policy_association.workload_deployer_admin \
+            -auto-approve || true
+
+      - name: phase 2 — full apply
+        working-directory: workloads/eaf/dev
+        run: |
+          set -euo pipefail
+          # Fresh plan after phase 1 — phase 1 changes state so saved plans go stale.
+          terraform plan  -no-color -input=false -lock-timeout=10m -out=tfplan-apply
+          terraform apply -no-color -input=false -lock-timeout=30m tfplan-apply
+
+      - name: outputs
+        if: always()
+        working-directory: workloads/eaf/dev
+        run: |
+          {
+            echo "## deployed"
+            echo '```'
+            terraform output -no-color 2>/dev/null || echo "no outputs yet"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 4. build-images — skipped on feature branches ──────────────────────────
+  build-images:
+    name: build ${{ matrix.image.name }}
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: tools/searxng
+            context: images/searxng
+          - name: tools/firecrawl
+            context: images/firecrawl
+          - name: tools/firecrawl-playwright
+            context: images/firecrawl-playwright
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: image tag
+        id: tag
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build
+        run: |
+          docker build \
+            --tag ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.tag.outputs.tag }} \
+            --tag ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:latest \
+            ${{ matrix.image.context }}
+
+      - name: scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.tag.outputs.tag }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          scanners: vuln
+          exit-code: 1
+          trivyignores: ${{ matrix.image.context }}/.trivyignore
+
+      - name: sarif report
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.tag.outputs.tag }}
+          format: sarif
+          output: trivy.sarif
+          scanners: vuln
+          exit-code: 0
+          trivyignores: ${{ matrix.image.context }}/.trivyignore
+
+      - name: upload sarif
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+
+      - name: configure ECR credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:role/eaf-agent-ci-role
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-ecr-push-${{ github.run_id }}
+
+      - name: push to ECR
+        run: |
+          aws ecr get-login-password --region ${{ vars.AWS_REGION }} \
+            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.tag.outputs.tag }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:latest
