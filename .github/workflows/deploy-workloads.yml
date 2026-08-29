@@ -67,7 +67,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-plan-${{ github.run_id }}
 
@@ -129,7 +129,7 @@ jobs:
           path: workloads/eaf/dev
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-apply-dev-${{ github.run_id }}
       - name: clear stuck state lock
@@ -139,11 +139,20 @@ jobs:
           KEY=$(grep '^key' backend.hcl | awk -F'"' '{print $2}')
           aws s3 rm "s3://${BUCKET}/${KEY}.tflock" --region eu-west-2 || true
 
-      - name: apply
+      - name: apply phase 1 — EKS access policy (unblocks K8s provider)
         working-directory: workloads/eaf/dev
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
+          # Apply ONLY the access policy association first.
+          # Without it the K8s/Helm provider returns 401 and the full apply fails.
+          # -target is only used here for bootstrap ordering, not ongoing deploys.
+          terraform apply -no-color -input=false -lock-timeout=10m             -target=aws_eks_access_policy_association.org_role_admin             -target=aws_eks_access_policy_association.workload_deployer_admin             -auto-approve || true
+
+      - name: apply phase 2 — full apply
+        working-directory: workloads/eaf/dev
+        run: |
+          set -euo pipefail
           terraform apply -no-color -input=false -lock-timeout=30m tfplan
       - name: summary
         working-directory: workloads/eaf/dev

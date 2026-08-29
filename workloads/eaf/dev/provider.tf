@@ -27,13 +27,15 @@ terraform {
   backend "s3" {}
 }
 
-# AWS provider — no assume_role.
-# GitHub Actions assumes eaf-workload-dev-deployer-role (OIDC directly in
-# EAF-DEV). The shell is already operating inside EAF-DEV — no management
-# account hop needed. The management account is not involved in workload
-# operations.
+# Default provider — assumes into EAF-DEV via the cross-account role AWS
+# creates automatically in every member account.
 provider "aws" {
   region = var.region
+
+  assume_role {
+    role_arn     = "arn:aws:iam::${var.account_id}:role/OrganizationAccountAccessRole"
+    session_name = "eaf-workloads-dev"
+  }
 }
 
 # Data sources resolved in the context of EAF-DEV.
@@ -42,10 +44,7 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-# Helm provider — no --role-arn flag.
-# The shell already holds eaf-workload-dev-deployer-role credentials.
-# That role has an EKS access entry (AmazonEKSClusterAdminPolicy) so
-# aws eks get-token succeeds with the current credentials as-is.
+# Helm provider — deploys Langfuse and its prerequisites into the EKS cluster.
 provider "helm" {
   kubernetes {
     host                   = aws_eks_cluster.this.endpoint
@@ -57,12 +56,14 @@ provider "helm" {
         "eks", "get-token",
         "--cluster-name", aws_eks_cluster.this.name,
         "--region", var.region,
+        "--role-arn", "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole",
       ]
     }
   }
 }
 
-# Kubernetes provider — same pattern as Helm above.
+# Kubernetes provider — creates Deployments, Services, ConfigMaps for
+# SearXNG and Crawl4AI (tools that have no official Helm charts).
 provider "kubernetes" {
   host                   = aws_eks_cluster.this.endpoint
   cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
@@ -73,6 +74,7 @@ provider "kubernetes" {
       "eks", "get-token",
       "--cluster-name", aws_eks_cluster.this.name,
       "--region", var.region,
+      "--role-arn", "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole",
     ]
   }
 }
