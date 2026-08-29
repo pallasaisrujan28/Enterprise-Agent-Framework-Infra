@@ -93,6 +93,13 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
+          # TODO: remove after first successful apply — clears null-identity state
+          # left by old kubernetes provider. New provider ~> 2.35 won't recreate this.
+          for r in kubernetes_deployment.searxng kubernetes_deployment.firecrawl_redis \
+                   kubernetes_deployment.firecrawl_playwright kubernetes_deployment.firecrawl_api \
+                   kubernetes_deployment.firecrawl_worker; do
+            terraform state rm "$r" 2>/dev/null || true
+          done
           terraform plan -no-color -input=false -lock-timeout=10m | tee plan.txt
           grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
 
