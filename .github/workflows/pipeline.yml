@@ -151,6 +151,23 @@ jobs:
         working-directory: workloads/eaf/dev
         run: terraform init -input=false -no-color -backend-config=backend.hcl
 
+      - name: one-time state fix — remove null-identity deployments
+        working-directory: workloads/eaf/dev
+        run: |
+          # TODO: remove this step after first successful apply.
+          # kubernetes provider ~> 2.0 stored null identity for deployments.
+          # Refresh panics comparing null (state) vs real (cluster) identity.
+          # Removing from state is safe — the provider re-imports on apply.
+          # New provider ~> 2.35 stores identity correctly going forward.
+          for r in \
+            kubernetes_deployment.searxng \
+            kubernetes_deployment.firecrawl_redis \
+            kubernetes_deployment.firecrawl_playwright \
+            kubernetes_deployment.firecrawl_api \
+            kubernetes_deployment.firecrawl_worker; do
+            terraform state rm "$r" 2>/dev/null || true
+          done
+
       - name: phase 1 — EKS access policy
         working-directory: workloads/eaf/dev
         run: |
