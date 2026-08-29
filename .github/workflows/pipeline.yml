@@ -98,7 +98,6 @@ jobs:
           # Correct fix: state rm (remove corrupt entry) + import (re-write with
           # correct identity). After first apply, state is clean and this is a no-op.
           for r in \
-            "kubernetes_deployment.searxng:tools/searxng" \
             "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
             "kubernetes_deployment.firecrawl_playwright:tools/firecrawl-playwright" \
             "kubernetes_deployment.firecrawl_api:tools/firecrawl-api" \
@@ -222,8 +221,6 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - name: tools/searxng
-            context: images/searxng
           - name: tools/firecrawl
             context: images/firecrawl
           - name: tools/firecrawl-playwright
