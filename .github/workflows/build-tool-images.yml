@@ -38,8 +38,6 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - name: tools/qdrant
-            context: images/qdrant
           - name: tools/searxng
             context: images/searxng
           - name: tools/firecrawl
@@ -84,7 +82,7 @@ jobs:
         with:
           image-ref: ${{ env.ECR_REGISTRY }}/${{ matrix.image.name }}:${{ steps.meta.outputs.tag }}
           format: sarif
-          output: trivy-${{ matrix.image.name == 'tools/qdrant' && 'qdrant' || matrix.image.name == 'tools/searxng' && 'searxng' || matrix.image.name == 'tools/firecrawl' && 'firecrawl' || 'firecrawl-playwright' }}.sarif
+          output: trivy-${{ matrix.image.name == 'tools/searxng' && 'searxng' || matrix.image.name == 'tools/firecrawl' && 'firecrawl' || 'firecrawl-playwright' }}.sarif
           scanners: vuln
           exit-code: 0
 
@@ -92,7 +90,7 @@ jobs:
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-${{ matrix.image.name == 'tools/qdrant' && 'qdrant' || matrix.image.name == 'tools/searxng' && 'searxng' || matrix.image.name == 'tools/firecrawl' && 'firecrawl' || 'firecrawl-playwright' }}.sarif
+          sarif_file: trivy-${{ matrix.image.name == 'tools/searxng' && 'searxng' || matrix.image.name == 'tools/firecrawl' && 'firecrawl' || 'firecrawl-playwright' }}.sarif
 
       # Push to ECR only on main — feature branches build and scan but don't publish
       - name: login to ECR

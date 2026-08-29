@@ -1,21 +1,21 @@
-# SEARCH TOOLS STACK — SearXNG + Firecrawl + Qdrant
+# SEARCH TOOLS STACK — SearXNG + Firecrawl
 #
-# Three components that back the agent's semantic tool registry:
+# Two components that give the agent web access:
 #
 #   SearXNG     → web search (aggregates Google, Bing, DuckDuckGo, etc.)
 #                 Internal URL: http://searxng.tools.svc.cluster.local:8080
 #
 #   Firecrawl   → full site crawl + single URL → clean markdown
-#                 Replaces Crawl4AI. Stronger: follows links, maps sites,
-#                 handles complex JS, async job queue.
+#                 Handles complex JS, async job queue, link-following.
 #                 Internal URL: http://firecrawl-api.tools.svc.cluster.local:3002
 #                 Stack: api + worker + playwright + redis
 #
-#   Qdrant      → vector store for session working memory
-#                 Internal URL: http://qdrant.tools.svc.cluster.local:6333
-#
-# Images are from ghcr.io (Firecrawl) and official DockerHub (SearXNG, Qdrant).
-# All images are scanned by Trivy in the deploy pipeline before apply.
+# Memory (Graphiti / Neo4j) lives in memory.tf — separate concern.
+# Images are scanned by Trivy in the deploy pipeline before apply.
+
+locals {
+  ecr = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+}
 
 resource "random_password" "searxng_secret" {
   length  = 32
@@ -88,7 +88,7 @@ resource "kubernetes_deployment" "searxng" {
       spec {
         container {
           name  = "searxng"
-          image = "searxng/searxng:latest"
+          image = "${local.ecr}/tools/searxng:latest"
           port { container_port = 8080 }
           env {
             name  = "SEARXNG_SETTINGS_PATH"
@@ -200,7 +200,7 @@ resource "kubernetes_deployment" "firecrawl_playwright" {
       spec {
         container {
           name  = "playwright"
-          image = "ghcr.io/mendableai/firecrawl-playwright-service:latest"
+          image = "${local.ecr}/tools/firecrawl-playwright:latest"
           port { container_port = 3000 }
           resources {
             requests = { cpu = "250m", memory = "512Mi" }
@@ -264,7 +264,7 @@ resource "kubernetes_deployment" "firecrawl_api" {
           for_each = [1]
           content {
             name    = "api"
-            image   = "ghcr.io/mendableai/firecrawl:latest"
+            image   = "${local.ecr}/tools/firecrawl:latest"
             command = ["pnpm", "run", "start:production"]
             port { container_port = 3002 }
             dynamic "env" {
@@ -328,7 +328,7 @@ resource "kubernetes_deployment" "firecrawl_worker" {
           for_each = [1]
           content {
             name    = "worker"
-            image   = "ghcr.io/mendableai/firecrawl:latest"
+            image   = "${local.ecr}/tools/firecrawl:latest"
             command = ["pnpm", "run", "workers"]
             dynamic "env" {
               for_each = local.firecrawl_env
@@ -351,35 +351,4 @@ resource "kubernetes_deployment" "firecrawl_worker" {
     kubernetes_deployment.firecrawl_playwright,
     kubernetes_deployment.firecrawl_api,
   ]
-}
-
-# ── Qdrant ─────────────────────────────────────────────────────────────────────
-
-resource "helm_release" "qdrant" {
-  name             = "qdrant"
-  repository       = "https://qdrant.github.io/qdrant-helm"
-  chart            = "qdrant"
-  namespace        = kubernetes_namespace.tools.metadata[0].name
-  create_namespace = false
-  wait             = true
-  timeout          = 300
-
-  set {
-    name  = "persistence.enabled"
-    value = "true"
-  }
-  set {
-    name  = "persistence.size"
-    value = "5Gi"
-  }
-  set {
-    name  = "resources.requests.memory"
-    value = "256Mi"
-  }
-  set {
-    name  = "resources.limits.memory"
-    value = "1Gi"
-  }
-
-  depends_on = [kubernetes_namespace.tools]
 }
