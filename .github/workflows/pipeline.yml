@@ -95,8 +95,9 @@ jobs:
           terraform init -input=false -no-color -backend-config=backend.hcl
           # One-time state migration: old kubernetes provider (~2.0) stored null
           # identity in state. New provider (2.38) panics comparing null vs real.
-          # Correct fix: state rm (remove corrupt entry) + import (re-write with
-          # correct identity). After first apply, state is clean and this is a no-op.
+          # searxng: removed from config — state rm only (no import, no resource block)
+          # firecrawl_*: still in config — state rm + import to re-write identity
+          terraform state rm kubernetes_deployment.searxng 2>/dev/null || true
           for r in \
             "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
             "kubernetes_deployment.firecrawl_playwright:tools/firecrawl-playwright" \
@@ -168,19 +169,8 @@ jobs:
       - name: one-time state fix — remove null-identity deployments
         working-directory: workloads/eaf/dev
         run: |
-          # TODO: remove this step after first successful apply.
-          # kubernetes provider ~> 2.0 stored null identity for deployments.
-          # Refresh panics comparing null (state) vs real (cluster) identity.
-          # Removing from state is safe — the provider re-imports on apply.
-          # New provider ~> 2.35 stores identity correctly going forward.
-          for r in \
-            kubernetes_deployment.searxng \
-            kubernetes_deployment.firecrawl_redis \
-            kubernetes_deployment.firecrawl_playwright \
-            kubernetes_deployment.firecrawl_api \
-            kubernetes_deployment.firecrawl_worker; do
-            terraform state rm "$r" 2>/dev/null || true
-          done
+          # One-time cleanup — remove after first successful apply.
+          terraform state rm kubernetes_deployment.searxng 2>/dev/null || true
 
       - name: phase 1 — EKS access policy
         working-directory: workloads/eaf/dev
