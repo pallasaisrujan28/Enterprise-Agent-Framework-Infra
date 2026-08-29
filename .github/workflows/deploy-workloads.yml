@@ -153,7 +153,10 @@ jobs:
         working-directory: workloads/eaf/dev
         run: |
           set -euo pipefail
-          terraform apply -no-color -input=false -lock-timeout=30m tfplan
+          # Re-plan after phase 1 — phase 1 modifies state so the original
+          # saved plan is stale. A fresh plan here is always consistent.
+          terraform plan -no-color -input=false -lock-timeout=10m -out=tfplan-fresh
+          terraform apply -no-color -input=false -lock-timeout=30m tfplan-fresh
       - name: summary
         working-directory: workloads/eaf/dev
         run: |
