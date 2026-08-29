@@ -75,6 +75,7 @@ jobs:
           ignore-unfixed: true
           scanners: vuln
           exit-code: 1
+          trivyignores: ${{ matrix.image.context }}/.trivyignore
 
       - name: generate SARIF
         uses: aquasecurity/trivy-action@master
