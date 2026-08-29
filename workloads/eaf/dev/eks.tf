@@ -282,3 +282,8 @@ resource "aws_eks_access_policy_association" "workload_deployer_admin" {
   }
   depends_on = [aws_eks_access_entry.workload_deployer]
 }
+
+import {
+  to = aws_eks_access_entry.org_role
+  id = "eaf-dev:arn:aws:iam::718438899462:role/OrganizationAccountAccessRole"
+}

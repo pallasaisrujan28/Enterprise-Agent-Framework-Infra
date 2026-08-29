@@ -130,7 +130,7 @@ resource "aws_cognito_user_pool_client" "eaf_agent" {
 resource "aws_secretsmanager_secret" "gateway_client_creds" {
   name                    = "eaf-dev/gateway/agent-client-creds"
   description             = "OAuth 2.0 client credentials for the EAF agent to authenticate with AgentCore Gateway"
-  recovery_window_in_days = 7
+  recovery_window_in_days = 0
 
   tags = {
     ManagedBy   = "terraform"
