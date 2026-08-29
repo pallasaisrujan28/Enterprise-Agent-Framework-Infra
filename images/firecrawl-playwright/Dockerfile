@@ -1,5 +1,5 @@
 # EAF-owned Firecrawl Playwright service image.
-FROM ghcr.io/mendableai/firecrawl-playwright-service:latest
+FROM ghcr.io/firecrawl/playwright-service:latest
 
 USER root
 RUN apt-get update \
