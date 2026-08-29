@@ -13,6 +13,10 @@
 # Memory (Graphiti / Neo4j) lives in memory.tf — separate concern.
 # Images are scanned by Trivy in the deploy pipeline before apply.
 
+locals {
+  ecr = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com"
+}
+
 resource "random_password" "searxng_secret" {
   length  = 32
   special = false
@@ -84,7 +88,7 @@ resource "kubernetes_deployment" "searxng" {
       spec {
         container {
           name  = "searxng"
-          image = "searxng/searxng:latest"
+          image = "${local.ecr}/tools/searxng:latest"
           port { container_port = 8080 }
           env {
             name  = "SEARXNG_SETTINGS_PATH"
@@ -196,7 +200,7 @@ resource "kubernetes_deployment" "firecrawl_playwright" {
       spec {
         container {
           name  = "playwright"
-          image = "ghcr.io/mendableai/firecrawl-playwright-service:latest"
+          image = "${local.ecr}/tools/firecrawl-playwright:latest"
           port { container_port = 3000 }
           resources {
             requests = { cpu = "250m", memory = "512Mi" }
@@ -260,7 +264,7 @@ resource "kubernetes_deployment" "firecrawl_api" {
           for_each = [1]
           content {
             name    = "api"
-            image   = "ghcr.io/mendableai/firecrawl:latest"
+            image   = "${local.ecr}/tools/firecrawl:latest"
             command = ["pnpm", "run", "start:production"]
             port { container_port = 3002 }
             dynamic "env" {
@@ -324,7 +328,7 @@ resource "kubernetes_deployment" "firecrawl_worker" {
           for_each = [1]
           content {
             name    = "worker"
-            image   = "ghcr.io/mendableai/firecrawl:latest"
+            image   = "${local.ecr}/tools/firecrawl:latest"
             command = ["pnpm", "run", "workers"]
             dynamic "env" {
               for_each = local.firecrawl_env

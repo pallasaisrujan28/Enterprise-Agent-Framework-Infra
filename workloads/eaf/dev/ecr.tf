@@ -47,3 +47,54 @@ resource "aws_ecr_lifecycle_policy" "agent" {
 #   trivy      → scans the Docker image after build, before push to ECR
 # Inspector is not used — pipeline scanning catches issues earlier and is free.
 # Add Inspector if compliance requires ongoing rescan of deployed images.
+
+# ── Tool images ────────────────────────────────────────────────────────────────
+#
+# The build-tool-images workflow builds security-patched versions of every
+# open-source tool image and pushes them here. EKS pods pull from these
+# repos — never directly from DockerHub or GHCR.
+#
+# Repos mirror the matrix in .github/workflows/build-tool-images.yml.
+
+locals {
+  tool_images = ["tools/searxng", "tools/firecrawl", "tools/firecrawl-playwright"]
+}
+
+resource "aws_ecr_repository" "tools" {
+  for_each = toset(local.tool_images)
+
+  name                 = each.key
+  image_tag_mutability = "MUTABLE" # tool images use :latest tag
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
+
+  tags = {
+    Environment = "dev"
+    ManagedBy   = "terraform"
+    Purpose     = "tool-container-images"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "tools" {
+  for_each   = aws_ecr_repository.tools
+  repository = each.value.name
+
+  policy = jsonencode({
+    rules = [{
+      rulePriority = 1
+      description  = "Keep last 10 images"
+      selection = {
+        tagStatus   = "any"
+        countType   = "imageCountMoreThan"
+        countNumber = 10
+      }
+      action = { type = "expire" }
+    }]
+  })
+}
