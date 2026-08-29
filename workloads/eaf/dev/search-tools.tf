@@ -17,6 +17,39 @@ locals {
   ecr = "${var.account_id}.dkr.ecr.${var.region}.amazonaws.com"
 }
 
+# ── One-time state migration ───────────────────────────────────────────────────
+# Previous applies used kubernetes provider ~> 2.0 which stored null identity
+# for deployments. The provider panics on refresh when null != real identity.
+# These removed blocks drop the resources from state WITHOUT deleting the actual
+# Kubernetes deployments. The resources are immediately re-added to state by the
+# normal resource blocks below.
+# Remove this section after the first successful apply (it is consumed once).
+
+removed {
+  from = kubernetes_deployment.searxng
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = kubernetes_deployment.firecrawl_playwright
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = kubernetes_deployment.firecrawl_redis
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = kubernetes_deployment.firecrawl_api
+  lifecycle { destroy = false }
+}
+
+removed {
+  from = kubernetes_deployment.firecrawl_worker
+  lifecycle { destroy = false }
+}
+
 resource "random_password" "searxng_secret" {
   length  = 32
   special = false
