@@ -338,3 +338,21 @@ Split it. Smaller PRs are reviewed faster, easier to revert, and create a
 cleaner git history.
 
 The goal: **a reviewer should be able to understand the full change in 5 minutes.**
+
+### Never reuse a merged branch
+
+Once a PR is merged, that branch is done. Every new piece of work — including
+a follow-up fix on the same area — starts from a fresh branch off the latest
+`main`.
+
+```
+# correct
+git fetch origin
+git checkout -b fix/some-new-thing origin/main
+
+# wrong — reusing a branch that was already merged
+git checkout feature/old-merged-branch
+```
+
+This keeps the branch list clean, prevents stale history from leaking into
+new PRs, and ensures every PR diff is exactly what it says it is.
