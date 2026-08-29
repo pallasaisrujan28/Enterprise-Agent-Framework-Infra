@@ -1,0 +1,19 @@
+# CVEs in Firecrawl Playwright's npm dependencies that cannot be patched from
+# a Dockerfile layer. Remove entries when upstream ships fixed package versions.
+# All are DoS-class; risk accepted for dev. Re-evaluate before prod.
+
+CVE-2026-12151
+CVE-2026-13149
+CVE-2026-14257
+CVE-2026-33671
+CVE-2026-48815
+CVE-2026-55487
+CVE-2026-55697
+CVE-2026-55698
+CVE-2026-55700
+CVE-2026-59873
+CVE-2026-59874
+CVE-2026-69152
+CVE-2026-69192
+CVE-2026-73566
+CVE-2026-9496

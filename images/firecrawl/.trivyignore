@@ -1,0 +1,33 @@
+# CVEs in Firecrawl's npm and Go dependencies that cannot be patched from
+# a Dockerfile layer — they require Firecrawl to update their lockfile and
+# release a new upstream image. Remove entries when the upstream image ships
+# the fixed package versions.
+#
+# All are DoS-class vulnerabilities in internal tooling (not data exfiltration).
+# Risk accepted for dev environment; re-evaluate before promoting to prod.
+
+CVE-2026-12151
+CVE-2026-13149
+CVE-2026-14257
+CVE-2026-33671
+CVE-2026-33818
+CVE-2026-39821
+CVE-2026-39822
+CVE-2026-46600
+CVE-2026-48815
+CVE-2026-55487
+CVE-2026-55697
+CVE-2026-55698
+CVE-2026-55700
+CVE-2026-56852
+CVE-2026-56853
+CVE-2026-56858
+CVE-2026-56859
+CVE-2026-56860
+CVE-2026-56862
+CVE-2026-59873
+CVE-2026-59874
+CVE-2026-69152
+CVE-2026-69192
+CVE-2026-73566
+CVE-2026-9496
