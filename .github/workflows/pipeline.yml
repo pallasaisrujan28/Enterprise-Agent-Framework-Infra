@@ -100,7 +100,11 @@ jobs:
                    kubernetes_deployment.firecrawl_worker; do
             terraform state rm "$r" 2>/dev/null || true
           done
-          terraform plan -no-color -input=false -lock-timeout=10m | tee plan.txt
+          # TODO: remove -refresh=false after first successful apply.
+          # Without it, plan re-reads removed deployments from Kubernetes and
+          # the provider panics on null vs real identity comparison.
+          # After first apply the new provider (2.38) stores correct identity.
+          terraform plan -no-color -input=false -lock-timeout=10m -refresh=false | tee plan.txt
           grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
 
       - name: summary
