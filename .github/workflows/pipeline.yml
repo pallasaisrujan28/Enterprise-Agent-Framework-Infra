@@ -138,10 +138,11 @@ jobs:
         run: |
           # Secrets in pending-deletion state block re-creation with the same name.
           # Force-delete them so Terraform can recreate cleanly.
+          # || true because it is fine if the secret does not exist
           aws secretsmanager delete-secret \
             --secret-id eaf-dev/gateway/agent-client-creds \
             --force-delete-without-recovery \
-            --region ${{ vars.AWS_REGION }} 2>/dev/null || true
+            --region ${{ vars.AWS_REGION }} || true
 
       - name: clear stuck state lock
         working-directory: workloads/eaf/dev

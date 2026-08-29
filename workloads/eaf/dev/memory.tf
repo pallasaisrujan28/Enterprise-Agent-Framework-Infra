@@ -18,7 +18,7 @@ resource "helm_release" "neo4j" {
   namespace        = kubernetes_namespace.tools.metadata[0].name
   create_namespace = false
   wait             = true
-  timeout          = 600
+  timeout          = 1200
 
   values = [<<-EOT
     neo4j:
