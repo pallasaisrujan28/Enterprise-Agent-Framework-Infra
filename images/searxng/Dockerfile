@@ -1,7 +1,9 @@
 # EAF-owned SearXNG image.
-# SearXNG uses Alpine Linux — patches via apk, not apt.
+# SearXNG moved from Alpine to Debian — patches via apt-get.
 FROM searxng/searxng:latest
 
 USER root
-RUN apk --no-cache upgrade
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 USER searxng
