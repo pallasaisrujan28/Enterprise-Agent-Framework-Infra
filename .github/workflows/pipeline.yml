@@ -151,6 +151,16 @@ jobs:
         working-directory: workloads/eaf/dev
         run: terraform init -input=false -no-color -backend-config=backend.hcl
 
+      - name: clean null-identity kubernetes state
+        working-directory: workloads/eaf/dev
+        run: |
+          # Kubernetes deployments created in partial applies store null identity.
+          # When the provider refreshes them it gets a real identity back and panics.
+          # Removing them from state forces Terraform to reconcile cleanly on apply.
+          terraform state list 2>/dev/null \
+            | grep '^kubernetes_deployment\.' \
+            | xargs -r terraform state rm 2>/dev/null || true
+
       - name: phase 1 — EKS access policy
         working-directory: workloads/eaf/dev
         run: |
