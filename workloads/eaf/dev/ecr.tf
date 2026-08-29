@@ -57,7 +57,7 @@ resource "aws_ecr_lifecycle_policy" "agent" {
 # Repos mirror the matrix in .github/workflows/build-tool-images.yml.
 
 locals {
-  tool_images = ["tools/searxng", "tools/firecrawl", "tools/firecrawl-playwright"]
+  tool_images = ["tools/firecrawl", "tools/firecrawl-playwright"]
 }
 
 resource "aws_ecr_repository" "tools" {

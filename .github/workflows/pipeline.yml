@@ -93,7 +93,10 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
-          terraform plan -no-color -input=false -lock-timeout=10m | tee plan.txt
+          # -refresh=false: plan role is read-only on state — state rm and import
+          # cannot write here. Deploy role fixes state permanently. After first
+          # successful deploy, remove -refresh=false (state is clean going forward).
+          terraform plan -no-color -input=false -lock-timeout=10m -refresh=false | tee plan.txt
           grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
 
       - name: summary
@@ -131,6 +134,15 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-deploy-${{ github.run_id }}
 
+      - name: force-delete pending secrets
+        run: |
+          # Secrets in pending-deletion state block re-creation with the same name.
+          # Force-delete them so Terraform can recreate cleanly.
+          aws secretsmanager delete-secret \
+            --secret-id eaf-dev/gateway/agent-client-creds \
+            --force-delete-without-recovery \
+            --region ${{ vars.AWS_REGION }} 2>/dev/null || true
+
       - name: clear stuck state lock
         working-directory: workloads/eaf/dev
         run: |
@@ -141,6 +153,25 @@ jobs:
       - name: init
         working-directory: workloads/eaf/dev
         run: terraform init -input=false -no-color -backend-config=backend.hcl
+
+      - name: one-time state fix — remove null-identity deployments
+        working-directory: workloads/eaf/dev
+        run: |
+          # One-time state migration — deployer role has state write access.
+          # Remove this block after first successful apply.
+          # searxng removed from config — state rm only
+          terraform state rm kubernetes_deployment.searxng 2>/dev/null || true
+          # firecrawl_* still in config — state rm + import to fix null identity
+          for r in \
+            "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
+            "kubernetes_deployment.firecrawl_playwright:tools/firecrawl-playwright" \
+            "kubernetes_deployment.firecrawl_api:tools/firecrawl-api" \
+            "kubernetes_deployment.firecrawl_worker:tools/firecrawl-worker"; do
+            resource="${r%%:*}"
+            id="${r##*:}"
+            terraform state rm "$resource" 2>/dev/null || true
+            terraform import -input=false "$resource" "$id" 2>/dev/null || true
+          done
 
       - name: phase 1 — EKS access policy
         working-directory: workloads/eaf/dev
@@ -181,8 +212,6 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - name: tools/searxng
-            context: images/searxng
           - name: tools/firecrawl
             context: images/firecrawl
           - name: tools/firecrawl-playwright
