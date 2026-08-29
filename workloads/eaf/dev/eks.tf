@@ -282,13 +282,3 @@ resource "aws_eks_access_policy_association" "workload_deployer_admin" {
   }
   depends_on = [aws_eks_access_entry.workload_deployer]
 }
-
-# ── Import blocks — reconcile partially-applied resources ─────────────────────
-# The EKS cluster and its access entry were created in a previous partial apply.
-# These import blocks bring them into Terraform state so the next apply
-# doesn't fail with "already in use" conflicts.
-
-import {
-  to = aws_eks_access_entry.org_role
-  id = "eaf-dev:arn:aws:iam::718438899462:role/OrganizationAccountAccessRole"
-}
