@@ -128,9 +128,35 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      - name: patch deployer role trust policy
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-trust-patch-${{ github.run_id }}
+
+      - name: add environment:dev to deployer role trust policy
+        run: |
+          CREDS=$(aws sts assume-role \
+            --role-arn arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:role/OrganizationAccountAccessRole \
+            --role-session-name trust-patch-${{ github.run_id }} \
+            --query Credentials --output json)
+          export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .AccessKeyId)
+          export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .SecretAccessKey)
+          export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .SessionToken)
+          aws iam update-assume-role-policy \
+            --role-name eaf-workload-dev-deployer-role \
+            --policy-document '{
+              "Version":"2012-10-17",
+              "Statement":[
+                {"Sid":"InfraRepoAnyBranch","Effect":"Allow","Principal":{"Federated":"arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:oidc-provider/token.actions.githubusercontent.com"},"Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringEquals":{"token.actions.githubusercontent.com:aud":"sts.amazonaws.com"},"StringLike":{"token.actions.githubusercontent.com:sub":"repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:ref:refs/heads/*"}}},
+                {"Sid":"InfraRepoDevEnvironment","Effect":"Allow","Principal":{"Federated":"arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:oidc-provider/token.actions.githubusercontent.com"},"Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringEquals":{"token.actions.githubusercontent.com:aud":"sts.amazonaws.com","token.actions.githubusercontent.com:sub":"repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:environment:dev"}}}
+              ]
+            }'
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-deploy-${{ github.run_id }}
 
