@@ -49,6 +49,15 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-destroy-${{ github.run_id }}
 
+      - name: clear stuck state lock
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: |
+          # S3 native locking (use_lockfile=true) leaves a .tflock object when a
+          # runner crashes. Delete it so the next init/destroy can acquire the lock.
+          BUCKET=$(grep 'bucket' backend.hcl | awk -F'"' '{print $2}')
+          KEY=$(grep '^key' backend.hcl | awk -F'"' '{print $2}')
+          aws s3 rm "s3://${BUCKET}/${KEY}.tflock" --region eu-west-2 || true
+
       - name: init
         working-directory: workloads/eaf/${{ inputs.target }}
         run: terraform init -input=false -no-color -backend-config=backend.hcl
