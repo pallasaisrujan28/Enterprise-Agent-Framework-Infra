@@ -77,27 +77,35 @@ resource "helm_release" "langfuse" {
   wait             = true
   timeout          = 600 # ClickHouse takes a while to start
 
+  # Secret values passed via set_sensitive to avoid YAML encoding issues
+  set_sensitive {
+    name  = "langfuse.salt"
+    value = random_password.langfuse_salt.result
+  }
+
+  set_sensitive {
+    name  = "langfuse.nextauth.secret"
+    value = random_password.langfuse_nextauth_secret.result
+  }
+
+  set {
+    name  = "langfuse.nextauth.url"
+    value = "http://langfuse-web.langfuse.svc.cluster.local:3000"
+  }
+
   values = [
     yamlencode({
       langfuse = {
-        salt = random_password.langfuse_salt.result
-        nextauth = {
-          secret = random_password.langfuse_nextauth_secret.result
-          # Internal URL — agent and UI access Langfuse within the cluster
-          url = "http://langfuse-web.langfuse.svc.cluster.local:3000"
-        }
         additionalEnv = [
           { name = "AUTH_DISABLE_USERNAME_PASSWORD", value = "false" }
         ]
       }
 
-      # All Langfuse pods run on the dedicated langfuse node group
       tolerations = [
         { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
       ]
       nodeSelector = { dedicated = "langfuse" }
 
-      # Bundled storage — all data stays in the cluster
       postgresql = {
         deploy = true
         primary = {
