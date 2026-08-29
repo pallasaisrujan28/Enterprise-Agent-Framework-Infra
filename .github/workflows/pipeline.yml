@@ -93,18 +93,22 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -input=false -no-color -backend-config=backend.hcl
-          # TODO: remove after first successful apply — clears null-identity state
-          # left by old kubernetes provider. New provider ~> 2.35 won't recreate this.
-          for r in kubernetes_deployment.searxng kubernetes_deployment.firecrawl_redis \
-                   kubernetes_deployment.firecrawl_playwright kubernetes_deployment.firecrawl_api \
-                   kubernetes_deployment.firecrawl_worker; do
-            terraform state rm "$r" 2>/dev/null || true
+          # One-time state migration: old kubernetes provider (~2.0) stored null
+          # identity in state. New provider (2.38) panics comparing null vs real.
+          # Correct fix: state rm (remove corrupt entry) + import (re-write with
+          # correct identity). After first apply, state is clean and this is a no-op.
+          for r in \
+            "kubernetes_deployment.searxng:tools/searxng" \
+            "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
+            "kubernetes_deployment.firecrawl_playwright:tools/firecrawl-playwright" \
+            "kubernetes_deployment.firecrawl_api:tools/firecrawl-api" \
+            "kubernetes_deployment.firecrawl_worker:tools/firecrawl-worker"; do
+            resource="${r%%:*}"
+            id="${r##*:}"
+            terraform state rm "$resource" 2>/dev/null || true
+            terraform import -input=false "$resource" "$id" 2>/dev/null || true
           done
-          # TODO: remove -refresh=false after first successful apply.
-          # Without it, plan re-reads removed deployments from Kubernetes and
-          # the provider panics on null vs real identity comparison.
-          # After first apply the new provider (2.38) stores correct identity.
-          terraform plan -no-color -input=false -lock-timeout=10m -refresh=false | tee plan.txt
+          terraform plan -no-color -input=false -lock-timeout=10m | tee plan.txt
           grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
 
       - name: summary
