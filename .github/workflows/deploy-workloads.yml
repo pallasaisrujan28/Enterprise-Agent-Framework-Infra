@@ -132,6 +132,13 @@ jobs:
           role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-apply-dev-${{ github.run_id }}
+      - name: clear stuck state lock
+        working-directory: workloads/eaf/dev
+        run: |
+          BUCKET=$(grep 'bucket' backend.hcl | awk -F'"' '{print $2}')
+          KEY=$(grep '^key' backend.hcl | awk -F'"' '{print $2}')
+          aws s3 rm "s3://${BUCKET}/${KEY}.tflock" --region eu-west-2 || true
+
       - name: apply phase 1 — EKS access policy (unblocks K8s provider)
         working-directory: workloads/eaf/dev
         run: |
