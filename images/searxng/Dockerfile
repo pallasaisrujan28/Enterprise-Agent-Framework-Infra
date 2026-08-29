@@ -1,9 +1,5 @@
 # EAF-owned SearXNG image.
-# SearXNG moved from Alpine to Debian — patches via apt-get.
+# SearXNG uses a minimal base image with no standard package manager (no apk,
+# no apt-get). Security patching is not possible at build time — Trivy scanning
+# in the pipeline identifies any fixable CVEs in the upstream image.
 FROM searxng/searxng:latest
-
-USER root
-RUN apt-get update \
-    && apt-get upgrade -y \
-    && rm -rf /var/lib/apt/lists/*
-USER searxng
