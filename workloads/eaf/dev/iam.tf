@@ -276,13 +276,12 @@ resource "aws_iam_role_policy" "agent_ci" {
 # Infra repo: pallasaisrujan28/Enterprise-Agent-Framework-Infra (id: 1324052608)
 
 locals {
-  infra_repo_prefix = "repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608"
+  infra_repo_sub = "repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:ref:refs/heads/*"
 }
 
 data "aws_iam_policy_document" "workload_deployer_trust" {
-  # Branch pushes — any branch in the infra repo (plan + feature branch checks)
   statement {
-    sid     = "InfraRepoAnyBranch"
+    sid     = "InfraRepoDirect"
     effect  = "Allow"
     actions = ["sts:AssumeRoleWithWebIdentity"]
 
@@ -300,31 +299,7 @@ data "aws_iam_policy_document" "workload_deployer_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${local.infra_repo_prefix}:ref:refs/heads/*"]
-    }
-  }
-
-  # Deploy job — runs in environment:dev which changes the sub claim format
-  statement {
-    sid     = "InfraRepoDevEnvironment"
-    effect  = "Allow"
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    principals {
-      type        = "Federated"
-      identifiers = ["arn:${data.aws_partition.current.partition}:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${local.infra_repo_prefix}:environment:dev"]
+      values   = [local.infra_repo_sub]
     }
   }
 }

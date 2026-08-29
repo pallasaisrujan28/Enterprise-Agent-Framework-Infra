@@ -130,7 +130,7 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-deploy-${{ github.run_id }}
 
