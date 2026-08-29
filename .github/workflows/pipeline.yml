@@ -136,9 +136,15 @@ jobs:
 
       - name: force-delete pending secrets
         run: |
-          # Secrets in pending-deletion state block re-creation with the same name.
-          # Force-delete them so Terraform can recreate cleanly.
-          # || true because it is fine if the secret does not exist
+          # eaf-baseline-dev-role has no direct access to EAF-DEV secrets.
+          # Assume OrganizationAccountAccessRole (admin in EAF-DEV) to delete.
+          CREDS=$(aws sts assume-role \
+            --role-arn arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:role/OrganizationAccountAccessRole \
+            --role-session-name secret-cleanup-${{ github.run_id }} \
+            --query Credentials --output json)
+          export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .AccessKeyId)
+          export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .SecretAccessKey)
+          export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .SessionToken)
           aws secretsmanager delete-secret \
             --secret-id eaf-dev/gateway/agent-client-creds \
             --force-delete-without-recovery \
