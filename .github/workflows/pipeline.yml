@@ -128,33 +128,28 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: patch deployer role trust policy
+      - name: configure credentials — management account (trust policy fix)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          role-session-name: eaf-trust-patch-${{ github.run_id }}
+          role-session-name: eaf-trust-fix-${{ github.run_id }}
 
-      - name: add environment:dev to deployer role trust policy
+      - name: apply deployer role trust policy via terraform
+        working-directory: workloads/eaf/dev
         run: |
-          CREDS=$(aws sts assume-role \
-            --role-arn arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:role/OrganizationAccountAccessRole \
-            --role-session-name trust-patch-${{ github.run_id }} \
-            --query Credentials --output json)
-          export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r .AccessKeyId)
-          export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r .SecretAccessKey)
-          export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r .SessionToken)
-          aws iam update-assume-role-policy \
-            --role-name eaf-workload-dev-deployer-role \
-            --policy-document '{
-              "Version":"2012-10-17",
-              "Statement":[
-                {"Sid":"InfraRepoAnyBranch","Effect":"Allow","Principal":{"Federated":"arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:oidc-provider/token.actions.githubusercontent.com"},"Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringEquals":{"token.actions.githubusercontent.com:aud":"sts.amazonaws.com"},"StringLike":{"token.actions.githubusercontent.com:sub":"repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:ref:refs/heads/*"}}},
-                {"Sid":"InfraRepoDevEnvironment","Effect":"Allow","Principal":{"Federated":"arn:aws:iam::${{ env.DEV_ACCOUNT_ID }}:oidc-provider/token.actions.githubusercontent.com"},"Action":"sts:AssumeRoleWithWebIdentity","Condition":{"StringEquals":{"token.actions.githubusercontent.com:aud":"sts.amazonaws.com","token.actions.githubusercontent.com:sub":"repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:environment:dev"}}}
-              ]
-            }'
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          # Targeted apply: update ONLY the deployer role trust policy.
+          # Uses management account role (provider assumes OrganizationAccountAccessRole).
+          # This is tracked in Terraform state — no drift. After this runs,
+          # the deployer role accepts environment:dev OIDC tokens.
+          terraform apply -no-color -input=false -lock-timeout=10m \
+            -target=aws_iam_role.workload_deployer \
+            -auto-approve
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: configure credentials — deployer role (all remaining steps)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
