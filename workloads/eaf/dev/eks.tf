@@ -247,6 +247,11 @@ resource "aws_eks_addon" "ebs_csi_driver" {
   depends_on = [aws_eks_node_group.default, aws_iam_role_policy_attachment.ebs_csi]
 }
 
+import {
+  to = aws_eks_addon.ebs_csi_driver
+  id = "eaf-dev:aws-ebs-csi-driver"
+}
+
 # Default StorageClass — marks gp2 as the cluster default so PVCs with no
 # storageClassName are satisfied automatically by EBS gp2 volumes.
 resource "kubernetes_storage_class" "gp2_default" {
