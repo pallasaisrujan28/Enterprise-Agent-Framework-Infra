@@ -36,19 +36,26 @@ resource "random_password" "langfuse_nextauth_secret" {
 # a plain string or { secretKeyRef: { name, key } }. We use secretKeyRef
 # to pass sensitive values properly through the chart's template engine.
 
+resource "kubernetes_namespace" "langfuse" {
+  metadata {
+    name = "langfuse"
+  }
+  depends_on = [aws_eks_node_group.langfuse]
+}
+
 resource "kubernetes_secret" "langfuse_credentials" {
   metadata {
     name      = "langfuse-credentials"
-    namespace = "langfuse"
+    namespace = kubernetes_namespace.langfuse.metadata[0].name
   }
 
   data = {
     salt            = random_password.langfuse_salt.result
     nextauth-secret = random_password.langfuse_nextauth_secret.result
   }
-
-  depends_on = [helm_release.cert_manager]
 }
+
+
 
 # ── Step 1: cert-manager ───────────────────────────────────────────────────────
 
@@ -91,8 +98,8 @@ resource "helm_release" "langfuse" {
   repository       = "https://langfuse.github.io/langfuse-k8s"
   chart            = "langfuse"
   version          = "1.2.4"
-  namespace        = "langfuse"
-  create_namespace = true
+  namespace        = kubernetes_namespace.langfuse.metadata[0].name
+  create_namespace = false
   wait             = true
   timeout          = 600 # ClickHouse takes a while to start
 
