@@ -202,6 +202,38 @@ resource "aws_eks_addon" "vpc_cni" {
   resolve_conflicts_on_update = "OVERWRITE"
 }
 
+# EBS CSI driver — required for dynamic EBS volume provisioning in EKS 1.23+.
+# Without it PVCs stay Pending indefinitely: no StorageClass can create EBS volumes.
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "aws-ebs-csi-driver"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  depends_on = [aws_eks_node_group.default]
+}
+
+# Default StorageClass — marks gp2 as the cluster default so PVCs with no
+# storageClassName are satisfied automatically by EBS gp2 volumes.
+resource "kubernetes_storage_class" "gp2_default" {
+  metadata {
+    name = "gp2"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" = "true"
+    }
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy         = "Delete"
+  volume_binding_mode    = "WaitForFirstConsumer"
+  allow_volume_expansion = true
+
+  parameters = {
+    type = "gp2"
+  }
+
+  depends_on = [aws_eks_addon.ebs_csi_driver]
+}
+
 # ── Langfuse node group ────────────────────────────────────────────────────────
 # ClickHouse needs more memory than our default t3.medium nodes (2 vCPU, 4 GB).
 # A dedicated t3.large node group (2 vCPU, 8 GB) keeps Langfuse isolated from
