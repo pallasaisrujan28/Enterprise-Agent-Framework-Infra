@@ -17,16 +17,12 @@ resource "helm_release" "neo4j" {
   version          = "5.26.0"
   namespace        = kubernetes_namespace.tools.metadata[0].name
   create_namespace = false
-  wait             = true
-  timeout          = 1200
+  wait             = false
 
   values = [<<-EOT
     neo4j:
       name: eaf-memory
       edition: community
-      # Auth disabled in dev — the tools namespace is cluster-internal only.
-      # Enable and rotate credentials before promoting to prod.
-      passwordFromSecret: ""
 
     volumes:
       data:

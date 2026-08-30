@@ -28,6 +28,12 @@ variable "node_instance_type" {
   default     = "t3.medium"
 }
 
+variable "ops_role_arn" {
+  description = "IAM role ARN granted kubectl cluster-admin access. Set to your SSO admin role so operators can run kubectl without extra steps."
+  type        = string
+  default     = "arn:aws:iam::718438899462:role/AWSReservedSSO_AWSAdministratorAccess_a8fd6486dea1ff46"
+}
+
 # Primary model for reasoning and generation.
 variable "bedrock_primary_model" {
   description = "Bedrock model ID for primary agent reasoning."
