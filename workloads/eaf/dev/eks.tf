@@ -271,6 +271,11 @@ resource "kubernetes_storage_class" "gp2_default" {
   depends_on = [aws_eks_addon.ebs_csi_driver]
 }
 
+import {
+  to = kubernetes_storage_class.gp2_default
+  id = "gp2-csi"
+}
+
 # ── Langfuse node group ────────────────────────────────────────────────────────
 # ClickHouse needs more memory than our default t3.medium nodes (2 vCPU, 4 GB).
 # A dedicated t3.large node group (2 vCPU, 8 GB) keeps Langfuse isolated from
