@@ -203,13 +203,48 @@ resource "aws_eks_addon" "vpc_cni" {
 }
 
 # EBS CSI driver — required for dynamic EBS volume provisioning in EKS 1.23+.
-# Without it PVCs stay Pending indefinitely: no StorageClass can create EBS volumes.
+# The controller pods use IRSA (service account annotation) to get EC2 permissions.
+# Without the IRSA role, the controller crashes: "no EC2 IMDS role found".
+
+data "aws_iam_policy_document" "ebs_csi_trust" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_provider}:sub"
+      values   = ["system:serviceaccount:kube-system:ebs-csi-controller-sa"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_provider}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ebs_csi" {
+  name               = "${var.cluster_name}-ebs-csi-role"
+  assume_role_policy = data.aws_iam_policy_document.ebs_csi_trust.json
+  tags               = { ManagedBy = "terraform" }
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  role       = aws_iam_role.ebs_csi.name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
 resource "aws_eks_addon" "ebs_csi_driver" {
   cluster_name                = aws_eks_cluster.this.name
   addon_name                  = "aws-ebs-csi-driver"
+  service_account_role_arn    = aws_iam_role.ebs_csi.arn
   resolve_conflicts_on_update = "OVERWRITE"
 
-  depends_on = [aws_eks_node_group.default]
+  depends_on = [aws_eks_node_group.default, aws_iam_role_policy_attachment.ebs_csi]
 }
 
 # Default StorageClass — marks gp2 as the cluster default so PVCs with no
