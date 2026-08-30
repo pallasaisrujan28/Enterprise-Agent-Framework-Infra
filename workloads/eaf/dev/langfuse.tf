@@ -3,13 +3,13 @@
 # Data residency: all trace data stays inside EKS in eu-west-2.
 # No data leaves the cluster to any external SaaS service.
 #
-# Architecture (all bundled in Kubernetes):
-#   langfuse-web     — UI + API server
-#   langfuse-worker  — async trace processor
-#   PostgreSQL       — user data, config, prompts
-#   ClickHouse       — traces, observations, scores (analytics)
-#   Redis/Valkey     — queue and cache
-#   SeaweedFS        — blob storage for raw events and attachments
+# Chart 2.x architecture (all bundled in Kubernetes):
+#   langfuse-web     — UI + API server (docker.langfuse.com)
+#   langfuse-worker  — async trace processor (docker.langfuse.com)
+#   PostgreSQL       — groundhog2k/postgres (docker.io/postgres:18)
+#   ClickHouse       — operator with clickhouse-server:26.4
+#   Valkey/Redis     — valkey-io/valkey (docker.io/valkey/valkey:8.0)
+#   SeaweedFS        — chrislusf/seaweedfs:3.95 (replaces MinIO)
 #
 # All Langfuse pods run on the dedicated langfuse node group (t3.large)
 # via tolerations, keeping them isolated from agent workloads.
@@ -47,9 +47,8 @@ resource "random_password" "langfuse_clickhouse_password" {
 }
 
 # ── Kubernetes secret for Langfuse credentials ────────────────────────────────
-# Langfuse chart 1.2.x uses getValueOrSecret helper which expects either
-# a plain string or { secretKeyRef: { name, key } }. We use secretKeyRef
-# to pass sensitive values properly through the chart's template engine.
+# All sensitive values in one secret. Chart 2.x supports secretKeyRef for
+# salt, nextauth.secret, and existingSecret for PostgreSQL/Redis/ClickHouse.
 
 resource "kubernetes_namespace" "langfuse" {
   metadata {
@@ -73,8 +72,6 @@ resource "kubernetes_secret" "langfuse_credentials" {
     clickhouse-password = random_password.langfuse_clickhouse_password.result
   }
 }
-
-
 
 # ── Step 1: cert-manager ───────────────────────────────────────────────────────
 
@@ -116,16 +113,15 @@ resource "helm_release" "langfuse" {
   name             = "langfuse"
   repository       = "https://langfuse.github.io/langfuse-k8s"
   chart            = "langfuse"
-  version          = "1.2.4"
+  version          = "2.0.2"
   namespace        = kubernetes_namespace.langfuse.metadata[0].name
   create_namespace = false
-  wait             = true
-  timeout          = 600 # ClickHouse takes a while to start
+  wait             = false # pods start async; health checked separately
 
   values = [
     yamlencode({
       langfuse = {
-        # secretKeyRef format — required by chart 1.2.x getValueOrSecret helper
+        # salt and nextauth.secret use secretKeyRef format (chart 2.x)
         salt = {
           secretKeyRef = {
             name = kubernetes_secret.langfuse_credentials.metadata[0].name
@@ -141,16 +137,16 @@ resource "helm_release" "langfuse" {
           }
           url = "http://langfuse-web.langfuse.svc.cluster.local:3000"
         }
-        additionalEnv = [
-          { name = "AUTH_DISABLE_USERNAME_PASSWORD", value = "false" }
+        # encryptionKey: leave empty — chart auto-generates and persists in <release>-app secret
+        tolerations = [
+          { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
         ]
+        nodeSelector = { dedicated = "langfuse" }
+        # allowV1Upgrade: true required when upgrading from chart 1.x (bitnami-based stores)
+        allowV1Upgrade = true
       }
 
-      tolerations = [
-        { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
-      ]
-      nodeSelector = { dedicated = "langfuse" }
-
+      # PostgreSQL — groundhog2k/postgres sub-chart (docker.io/postgres:18)
       postgresql = {
         deploy = true
         auth = {
@@ -160,21 +156,43 @@ resource "helm_release" "langfuse" {
             userPasswordKey  = "password"
           }
         }
-        primary = {
-          tolerations = [
-            { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
-          ]
-          nodeSelector = { dedicated = "langfuse" }
-        }
+        tolerations = [
+          { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
+        ]
+        nodeSelector = { dedicated = "langfuse" }
       }
 
+      # Redis/Valkey — valkey-io/valkey sub-chart (docker.io/valkey/valkey:8.0)
       redis = {
         deploy = true
         auth = {
           existingSecret            = kubernetes_secret.langfuse_credentials.metadata[0].name
           existingSecretPasswordKey = "redis-password"
         }
-        master = {
+      }
+
+      # ClickHouse — via altinity operator (clickhouse-server:26.4)
+      # keeper.replicas=1 for dev (production uses 3 for HA)
+      clickhouse = {
+        deploy = true
+        auth = {
+          existingSecret    = kubernetes_secret.langfuse_credentials.metadata[0].name
+          existingSecretKey = "clickhouse-password"
+        }
+        cluster = {
+          replicas = 1
+          resources = {
+            requests = { cpu = "500m", memory = "2Gi" }
+            limits   = { memory = "4Gi" }
+          }
+          tolerations = [
+            { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
+          ]
+          nodeSelector = { dedicated = "langfuse" }
+        }
+        keeper = {
+          enabled  = true
+          replicas = 1
           tolerations = [
             { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
           ]
@@ -182,19 +200,10 @@ resource "helm_release" "langfuse" {
         }
       }
 
-      clickhouse = {
-        deploy   = true
-        shards   = 1
-        replicas = 1
-        auth = {
-          existingSecret    = kubernetes_secret.langfuse_credentials.metadata[0].name
-          existingSecretKey = "clickhouse-password"
-        }
-      }
-
-      seaweedfs = {
+      # S3/SeaweedFS — chrislusf/seaweedfs:3.95 (replaces MinIO from 1.x)
+      s3 = {
         deploy = true
-        master = {
+        allInOne = {
           tolerations = [
             { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
           ]
