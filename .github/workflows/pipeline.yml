@@ -116,7 +116,9 @@ jobs:
     needs: plan
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: dev
+    # No environment: — with environment: dev the OIDC sub becomes
+    # environment:dev which the deployer role trust policy does not accept.
+    # Without it the sub is ref:refs/heads/main which matches ref:refs/heads/*.
     concurrency:
       group: deploy-dev
       cancel-in-progress: false
@@ -128,28 +130,7 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: configure credentials — management account (trust policy fix)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-          role-session-name: eaf-trust-fix-${{ github.run_id }}
-
-      - name: apply deployer role trust policy via terraform
-        working-directory: workloads/eaf/dev
-        run: |
-          set -euo pipefail
-          terraform init -input=false -no-color -backend-config=backend.hcl
-          # Targeted apply: update ONLY the deployer role trust policy.
-          # Uses management account role (provider assumes OrganizationAccountAccessRole).
-          # This is tracked in Terraform state — no drift. After this runs,
-          # the deployer role accepts environment:dev OIDC tokens.
-          terraform apply -no-color -input=false -lock-timeout=10m \
-            -target=aws_iam_role.workload_deployer \
-            -auto-approve
-
-      - name: configure credentials — deployer role (all remaining steps)
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
