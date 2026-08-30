@@ -242,16 +242,18 @@ resource "aws_eks_addon" "ebs_csi_driver" {
   cluster_name                = aws_eks_cluster.this.name
   addon_name                  = "aws-ebs-csi-driver"
   service_account_role_arn    = aws_iam_role.ebs_csi.arn
+  resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
   depends_on = [aws_eks_node_group.default, aws_iam_role_policy_attachment.ebs_csi]
 }
 
-# Default StorageClass — marks gp2 as the cluster default so PVCs with no
-# storageClassName are satisfied automatically by EBS gp2 volumes.
+# Default StorageClass using the EBS CSI provisioner.
+# Named gp2-csi to avoid conflict with the existing in-tree gp2 StorageClass.
+# Created manually in the cluster first; this resource tracks/manages it via Terraform.
 resource "kubernetes_storage_class" "gp2_default" {
   metadata {
-    name = "gp2"
+    name = "gp2-csi"
     annotations = {
       "storageclass.kubernetes.io/is-default-class" = "true"
     }
