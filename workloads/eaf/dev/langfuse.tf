@@ -31,6 +31,11 @@ resource "random_password" "langfuse_nextauth_secret" {
   special = false
 }
 
+resource "random_password" "langfuse_postgres_password" {
+  length  = 32
+  special = false
+}
+
 # ── Kubernetes secret for Langfuse credentials ────────────────────────────────
 # Langfuse chart 1.2.x uses getValueOrSecret helper which expects either
 # a plain string or { secretKeyRef: { name, key } }. We use secretKeyRef
@@ -50,8 +55,10 @@ resource "kubernetes_secret" "langfuse_credentials" {
   }
 
   data = {
-    salt            = random_password.langfuse_salt.result
-    nextauth-secret = random_password.langfuse_nextauth_secret.result
+    salt              = random_password.langfuse_salt.result
+    nextauth-secret   = random_password.langfuse_nextauth_secret.result
+    postgres-password = random_password.langfuse_postgres_password.result
+    password          = random_password.langfuse_postgres_password.result
   }
 }
 
@@ -134,6 +141,13 @@ resource "helm_release" "langfuse" {
 
       postgresql = {
         deploy = true
+        auth = {
+          existingSecret = kubernetes_secret.langfuse_credentials.metadata[0].name
+          secretKeys = {
+            adminPasswordKey = "postgres-password"
+            userPasswordKey  = "password"
+          }
+        }
         primary = {
           tolerations = [
             { key = "dedicated", value = "langfuse", effect = "NoSchedule", operator = "Equal" }
