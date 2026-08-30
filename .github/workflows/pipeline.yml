@@ -88,6 +88,13 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-plan-${{ github.run_id }}
 
+      - name: clear stuck state lock
+        working-directory: workloads/eaf/dev
+        run: |
+          BUCKET=$(grep 'bucket' backend.hcl | awk -F'"' '{print $2}')
+          KEY=$(grep '^key' backend.hcl | awk -F'"' '{print $2}')
+          aws s3 rm "s3://${BUCKET}/${KEY}.tflock" --region eu-west-2 || true
+
       - name: plan workloads/eaf/dev
         working-directory: workloads/eaf/dev
         run: |
