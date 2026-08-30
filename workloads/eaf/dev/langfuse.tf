@@ -19,7 +19,7 @@
 #   2. ClickHouse operator — CRDs required before ClickHouse pods start
 #   3. Langfuse           — the actual observability stack
 
-# ── Random secrets (generated once, stored as Kubernetes secrets by Helm) ──────
+# ── Random secrets ────────────────────────────────────────────────────────────
 
 resource "random_password" "langfuse_salt" {
   length  = 32
@@ -29,6 +29,25 @@ resource "random_password" "langfuse_salt" {
 resource "random_password" "langfuse_nextauth_secret" {
   length  = 32
   special = false
+}
+
+# ── Kubernetes secret for Langfuse credentials ────────────────────────────────
+# Langfuse chart 1.2.x uses getValueOrSecret helper which expects either
+# a plain string or { secretKeyRef: { name, key } }. We use secretKeyRef
+# to pass sensitive values properly through the chart's template engine.
+
+resource "kubernetes_secret" "langfuse_credentials" {
+  metadata {
+    name      = "langfuse-credentials"
+    namespace = "langfuse"
+  }
+
+  data = {
+    salt            = random_password.langfuse_salt.result
+    nextauth-secret = random_password.langfuse_nextauth_secret.result
+  }
+
+  depends_on = [helm_release.cert_manager]
 }
 
 # ── Step 1: cert-manager ───────────────────────────────────────────────────────
@@ -77,25 +96,25 @@ resource "helm_release" "langfuse" {
   wait             = true
   timeout          = 600 # ClickHouse takes a while to start
 
-  # Secret values passed via set_sensitive to avoid YAML encoding issues
-  set_sensitive {
-    name  = "langfuse.salt"
-    value = random_password.langfuse_salt.result
-  }
-
-  set_sensitive {
-    name  = "langfuse.nextauth.secret"
-    value = random_password.langfuse_nextauth_secret.result
-  }
-
-  set {
-    name  = "langfuse.nextauth.url"
-    value = "http://langfuse-web.langfuse.svc.cluster.local:3000"
-  }
-
   values = [
     yamlencode({
       langfuse = {
+        # secretKeyRef format — required by chart 1.2.x getValueOrSecret helper
+        salt = {
+          secretKeyRef = {
+            name = kubernetes_secret.langfuse_credentials.metadata[0].name
+            key  = "salt"
+          }
+        }
+        nextauth = {
+          secret = {
+            secretKeyRef = {
+              name = kubernetes_secret.langfuse_credentials.metadata[0].name
+              key  = "nextauth-secret"
+            }
+          }
+          url = "http://langfuse-web.langfuse.svc.cluster.local:3000"
+        }
         additionalEnv = [
           { name = "AUTH_DISABLE_USERNAME_PASSWORD", value = "false" }
         ]
@@ -144,5 +163,5 @@ resource "helm_release" "langfuse" {
     })
   ]
 
-  depends_on = [helm_release.clickhouse_operator]
+  depends_on = [helm_release.clickhouse_operator, kubernetes_secret.langfuse_credentials]
 }
