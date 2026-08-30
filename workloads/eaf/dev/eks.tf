@@ -287,3 +287,25 @@ import {
   to = aws_eks_access_entry.org_role
   id = "eaf-dev:arn:aws:iam::718438899462:role/OrganizationAccountAccessRole"
 }
+
+# ── Operator access — SSO admin role ─────────────────────────────────────────
+# Grants kubectl cluster-admin to the ops role (SSO administrator).
+# Having IAM AdministratorAccess alone is not enough to use kubectl — EKS
+# requires an explicit access entry. Without this, operators can manage the
+# cluster infrastructure via AWS API but cannot run kubectl commands.
+
+resource "aws_eks_access_entry" "ops" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = var.ops_role_arn
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "ops_admin" {
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = var.ops_role_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  access_scope {
+    type = "cluster"
+  }
+  depends_on = [aws_eks_access_entry.ops]
+}
