@@ -23,9 +23,6 @@ resource "helm_release" "neo4j" {
     neo4j:
       name: eaf-memory
       edition: community
-      # Auth disabled in dev — the tools namespace is cluster-internal only.
-      # Enable and rotate credentials before promoting to prod.
-      passwordFromSecret: ""
 
     volumes:
       data:
