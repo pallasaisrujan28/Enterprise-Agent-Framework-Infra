@@ -164,6 +164,10 @@ jobs:
           # Remove this block after first successful apply.
           # searxng removed from config — state rm only
           terraform state rm kubernetes_deployment.searxng 2>/dev/null || true
+          # gp2-csi StorageClass created via kubectl — import into state
+          # (import block removed from eks.tf: plan role has no K8s API access)
+          terraform state rm kubernetes_storage_class.gp2_default 2>/dev/null || true
+          terraform import -input=false kubernetes_storage_class.gp2_default gp2-csi 2>/dev/null || true
           # firecrawl_* still in config — state rm + import to fix null identity
           for r in \
             "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
