@@ -41,6 +41,11 @@ resource "random_password" "langfuse_redis_password" {
   special = false
 }
 
+resource "random_password" "langfuse_clickhouse_password" {
+  length  = 32
+  special = false
+}
+
 # ── Kubernetes secret for Langfuse credentials ────────────────────────────────
 # Langfuse chart 1.2.x uses getValueOrSecret helper which expects either
 # a plain string or { secretKeyRef: { name, key } }. We use secretKeyRef
@@ -60,11 +65,12 @@ resource "kubernetes_secret" "langfuse_credentials" {
   }
 
   data = {
-    salt              = random_password.langfuse_salt.result
-    nextauth-secret   = random_password.langfuse_nextauth_secret.result
-    postgres-password = random_password.langfuse_postgres_password.result
-    password          = random_password.langfuse_postgres_password.result
-    redis-password    = random_password.langfuse_redis_password.result
+    salt                = random_password.langfuse_salt.result
+    nextauth-secret     = random_password.langfuse_nextauth_secret.result
+    postgres-password   = random_password.langfuse_postgres_password.result
+    password            = random_password.langfuse_postgres_password.result
+    redis-password      = random_password.langfuse_redis_password.result
+    clickhouse-password = random_password.langfuse_clickhouse_password.result
   }
 }
 
@@ -180,6 +186,10 @@ resource "helm_release" "langfuse" {
         deploy   = true
         shards   = 1
         replicas = 1
+        auth = {
+          existingSecret    = kubernetes_secret.langfuse_credentials.metadata[0].name
+          existingSecretKey = "clickhouse-password"
+        }
       }
 
       seaweedfs = {
