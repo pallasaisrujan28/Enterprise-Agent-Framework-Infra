@@ -27,15 +27,11 @@ terraform {
   backend "s3" {}
 }
 
-# Default provider — assumes into EAF-DEV via the cross-account role AWS
-# creates automatically in every member account.
+# AWS provider — no assume_role needed.
+# The pipeline authenticates as eaf-workload-dev-deployer-role which is already
+# in EAF-DEV (718438899462). No cross-account hop required.
 provider "aws" {
   region = var.region
-
-  assume_role {
-    role_arn     = "arn:aws:iam::${var.account_id}:role/OrganizationAccountAccessRole"
-    session_name = "eaf-workloads-dev"
-  }
 }
 
 # Data sources resolved in the context of EAF-DEV.
@@ -44,7 +40,8 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-# Helm provider — deploys Langfuse and its prerequisites into the EKS cluster.
+# Helm provider — uses deployer role credentials directly.
+# eaf-workload-dev-deployer-role has an EKS access entry with ClusterAdmin.
 provider "helm" {
   kubernetes {
     host                   = aws_eks_cluster.this.endpoint
@@ -56,14 +53,12 @@ provider "helm" {
         "eks", "get-token",
         "--cluster-name", aws_eks_cluster.this.name,
         "--region", var.region,
-        "--role-arn", "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole",
       ]
     }
   }
 }
 
-# Kubernetes provider — creates Deployments, Services, ConfigMaps for
-# SearXNG and Crawl4AI (tools that have no official Helm charts).
+# Kubernetes provider — same as Helm above.
 provider "kubernetes" {
   host                   = aws_eks_cluster.this.endpoint
   cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
@@ -74,7 +69,6 @@ provider "kubernetes" {
       "eks", "get-token",
       "--cluster-name", aws_eks_cluster.this.name,
       "--region", var.region,
-      "--role-arn", "arn:${data.aws_partition.current.partition}:iam::${var.account_id}:role/OrganizationAccountAccessRole",
     ]
   }
 }
