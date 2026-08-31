@@ -51,3 +51,10 @@ crash.*.log
 # validation. Nothing in here is part of the pipeline, and some of it reads
 # credentials from a file outside the repo.
 .local/
+
+# Dependency lock files belong to ROOT modules, which commit them so that a CI
+# runner resolves the same provider versions as a laptop. Terraform does not read
+# a lock file inside a shared module, so one committed under modules/ is both
+# meaningless and misleading. `terraform init` and `terraform test` create them
+# there as a side effect of running module tests — ignore those.
+modules/**/.terraform.lock.hcl
