@@ -248,6 +248,184 @@ run "irsa_emits_both_sub_and_aud" {
   }
 }
 
+# ── Pod Identity ─────────────────────────────────────────────────────────────
+
+run "pod_identity_emits_the_documented_trust_shape" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "agent"
+    trust = {
+      type = "eks_pod_identity"
+      eks_pod_identity = {
+        namespace       = "eaf"
+        service_account = "eaf-agent"
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      one(jsondecode(aws_iam_role.this.assume_role_policy).Statement).Principal.Service == "pods.eks.amazonaws.com"
+    )
+    error_message = "Pod Identity trust must name the pods.eks.amazonaws.com service principal."
+  }
+
+  # Both actions, always. EKS always sends session tags, so a trust policy granting
+  # only sts:AssumeRole fails the assumption.
+  assert {
+    condition = (
+      join(",", sort(one(jsondecode(aws_iam_role.this.assume_role_policy).Statement).Action))
+      == "sts:AssumeRole,sts:TagSession"
+    )
+    error_message = "Pod Identity trust must allow both sts:AssumeRole and sts:TagSession."
+  }
+
+  # No OIDC anything. This is the whole point of the mechanism.
+  assert {
+    condition     = !strcontains(aws_iam_role.this.assume_role_policy, "oidc")
+    error_message = "a Pod Identity trust policy should reference no OIDC provider or issuer."
+  }
+
+  assert {
+    condition     = !strcontains(aws_iam_role.this.assume_role_policy, "AssumeRoleWithWebIdentity")
+    error_message = "Pod Identity uses sts:AssumeRole, not sts:AssumeRoleWithWebIdentity."
+  }
+}
+
+run "pod_identity_always_scopes_to_namespace_and_service_account" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "agent"
+    trust = {
+      type = "eks_pod_identity"
+      eks_pod_identity = {
+        namespace       = "eaf"
+        service_account = "eaf-agent"
+      }
+    }
+  }
+
+  # The regression guarded here: AWS's own documented example trust policy carries
+  # NO conditions, which permits any pod in any namespace in any cluster in the
+  # account. That is broader than the IRSA policy this replaces, so the module emits
+  # the conditions whether or not the caller thought to ask.
+  assert {
+    condition = (
+      one(jsondecode(aws_iam_role.this.assume_role_policy).Statement).Condition.StringEquals["aws:RequestTag/kubernetes-namespace"] == "eaf"
+    )
+    error_message = "namespace condition missing — the role would be assumable from any namespace."
+  }
+
+  assert {
+    condition = (
+      one(jsondecode(aws_iam_role.this.assume_role_policy).Statement).Condition.StringEquals["aws:RequestTag/kubernetes-service-account"] == "eaf-agent"
+    )
+    error_message = "service account condition missing — the role would be assumable by any service account."
+  }
+
+  # aws:RequestTag, not aws:PrincipalTag. Both key families accept the same six tag
+  # names, so the wrong one yields valid JSON that applies cleanly and never
+  # matches. Trust policies condition on the request.
+  assert {
+    condition     = !strcontains(aws_iam_role.this.assume_role_policy, "aws:PrincipalTag")
+    error_message = "trust policy used aws:PrincipalTag; session tags on an AssumeRole request are aws:RequestTag."
+  }
+
+  # Absent cluster_names means any cluster, which is the reuse property.
+  assert {
+    condition     = !strcontains(aws_iam_role.this.assume_role_policy, "eks-cluster-name")
+    error_message = "no cluster condition should be emitted when cluster_names is omitted."
+  }
+}
+
+run "pod_identity_can_be_pinned_to_named_clusters" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "agent"
+    trust = {
+      type = "eks_pod_identity"
+      eks_pod_identity = {
+        namespace       = "eaf"
+        service_account = "eaf-agent"
+        cluster_names   = ["eaf-dev", "eaf-dev-blue"]
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      join(",", one(jsondecode(aws_iam_role.this.assume_role_policy).Statement).Condition.StringEquals["aws:RequestTag/eks-cluster-name"])
+      == "eaf-dev,eaf-dev-blue"
+    )
+    error_message = "cluster_names should emit an eks-cluster-name condition listing exactly those clusters."
+  }
+}
+
+run "reject_empty_cluster_names" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "agent"
+    trust = {
+      type = "eks_pod_identity"
+      eks_pod_identity = {
+        namespace       = "eaf"
+        service_account = "eaf-agent"
+        # An empty list emits a condition with no permitted values, which never
+        # matches. Omission is how you say "any cluster".
+        cluster_names = []
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
+}
+
+run "reject_namespace_that_kubernetes_cannot_create" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "agent"
+    trust = {
+      type = "eks_pod_identity"
+      eks_pod_identity = {
+        # Uppercase is not a valid RFC 1123 label. An association may name objects
+        # that do not exist yet, so nothing would report this until the pod failed.
+        namespace       = "EAF_Prod"
+        service_account = "eaf-agent"
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
+}
+
+run "reject_pod_identity_payload_with_irsa_type" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "agent"
+    trust = {
+      type = "eks_irsa"
+      eks_pod_identity = {
+        namespace       = "eaf"
+        service_account = "eaf-agent"
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
+}
+
 # ── The issuer host is derived, never assumed ────────────────────────────────
 
 run "github_issuer_host_comes_from_the_provider_arn" {

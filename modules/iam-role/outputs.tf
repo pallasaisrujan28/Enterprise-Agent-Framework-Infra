@@ -46,9 +46,21 @@ output "inventory" {
 
     # Flattened for human review: the exact subjects that may assume this role.
     # An over-broad trust policy is visible here without reading JSON.
+    #
+    # For eks_pod_identity the cluster scope is spelled out rather than left implicit,
+    # because "any cluster in this account" is the default and is the one thing about
+    # this trust type a reviewer must not have to infer.
     trusted_subjects = (
       var.trust.type == "github_oidc" ? local.gh_subjects :
       var.trust.type == "eks_irsa" ? ["system:serviceaccount:${local.irsa.namespace}:${local.irsa.service_account}"] :
+      var.trust.type == "eks_pod_identity" ? [
+        format(
+          "system:serviceaccount:%s:%s (clusters: %s)",
+          local.pid.namespace,
+          local.pid.service_account,
+          try(local.pid.cluster_names, null) == null ? "ANY in this account" : join(", ", local.pid.cluster_names),
+        )
+      ] :
       var.trust.type == "aws_service" ? var.trust.aws_service.service_principals :
       var.trust.account_principal.principal_arns
     )

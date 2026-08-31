@@ -24,7 +24,7 @@ locals {
 
   # ── Trust policy construction ───────────────────────────────────────────────
   #
-  # Built with jsonencode rather than aws_iam_policy_document, because the four
+  # Built with jsonencode rather than aws_iam_policy_document, because the five
   # trust shapes need different principal types and condition keys, and a data
   # source with dynamic blocks for that is harder to read than the JSON it emits.
 
@@ -57,6 +57,29 @@ locals {
   ]
 
   irsa = var.trust.eks_irsa
+  pid  = var.trust.eks_pod_identity
+
+  # Pod Identity conditions match on aws:RequestTag, NOT aws:PrincipalTag.
+  #
+  # Both key families exist and both take the same six tag names, so the wrong one
+  # is easy to write and produces a trust policy that is valid JSON, applies
+  # cleanly, and never matches. The distinction: EKS passes these as session tags on
+  # the AssumeRole *request*, so in a TRUST policy they are aws:RequestTag. Once the
+  # session exists they are readable as aws:PrincipalTag — which is what an identity
+  # or resource policy uses for ABAC. Trust policy is the request side.
+  pid_conditions = local.pid == null ? {} : {
+    StringEquals = merge(
+      {
+        "aws:RequestTag/kubernetes-namespace"       = local.pid.namespace
+        "aws:RequestTag/kubernetes-service-account" = local.pid.service_account
+      },
+      # Omitted means any cluster in this account, which is the reuse property that
+      # makes Pod Identity worth having. Present means exactly these.
+      try(local.pid.cluster_names, null) == null ? {} : {
+        "aws:RequestTag/eks-cluster-name" = local.pid.cluster_names
+      },
+    )
+  }
 
   assume_role_statements = {
     github_oidc = local.gh == null ? [] : [{
@@ -91,6 +114,22 @@ locals {
           "${local.irsa_issuer}:aud" = "sts.amazonaws.com"
         }
       }
+    }]
+
+    eks_pod_identity = local.pid == null ? [] : [{
+      # Sid matches the one AWS uses in its documented example, so a role created
+      # here is recognisable against the docs.
+      Sid       = "AllowEksAuthToAssumeRoleForPodIdentity"
+      Effect    = "Allow"
+      Principal = { Service = "pods.eks.amazonaws.com" }
+
+      # BOTH actions are required and neither is optional. sts:AssumeRole is the
+      # assumption itself; sts:TagSession is what lets EKS attach the session tags —
+      # and without it the assumption fails, because EKS always sends them. A trust
+      # policy with only sts:AssumeRole is a documented way to break this.
+      Action = ["sts:AssumeRole", "sts:TagSession"]
+
+      Condition = local.pid_conditions
     }]
 
     aws_service = var.trust.aws_service == null ? [] : [{

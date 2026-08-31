@@ -115,8 +115,8 @@ variable "boundary_exemption_reason" {
 # A tagged union. Terraform has no union type, so `type` selects which payload
 # must be present and a validation enforces the pairing.
 #
-# The two payloads that exist because they are where this repository has actually
-# lost time:
+# The payloads that carry extra opinions, because they are where this repository has
+# actually lost time or where the vendor's own example is unsafe:
 #
 #   github_oidc — the sub claim is MUTUALLY EXCLUSIVE by job context. GitHub
 #     documents that the `ref:` form applies only when the job does not reference
@@ -129,6 +129,12 @@ variable "boundary_exemption_reason" {
 #   eks_irsa — both the :sub and :aud conditions are emitted, always. Omitting
 #     :aud is a documented way to make an IRSA trust policy far broader than
 #     intended, so it is not the caller's decision.
+#
+#   eks_pod_identity — the namespace and service-account conditions are emitted,
+#     always. AWS's own documented example trust policy has NO conditions, which
+#     means "any pod in any namespace in any cluster in this account". That is
+#     broader than the IRSA policy it replaces, so it is not the caller's decision
+#     either.
 
 variable "trust" {
   description = "Who may assume this role. Set `type` and exactly the matching payload."
@@ -146,9 +152,32 @@ variable "trust" {
       contexts          = list(string)
     }))
 
+    # Pod Identity. No OIDC provider anywhere: the principal is a fixed service,
+    # and EKS holds the cluster/namespace/service-account mapping in an
+    # association object rather than in this trust policy.
+    #
+    # namespace and service_account are REQUIRED even though AWS's own example
+    # trust policy omits conditions entirely. Without them the policy reads
+    # "any pod, in any namespace, in any cluster in this account, may assume this
+    # role" — strictly broader than the IRSA equivalent it replaces. The only thing
+    # standing between that and use is iam:PassRole on the association creator,
+    # which is a permission on a different principal, not a property of this role.
+    #
+    # cluster_names is optional, and left optional deliberately: constraining it
+    # forfeits the reuse-across-clusters property that is one of Pod Identity's real
+    # advantages. Set it where a role must not be usable from another cluster.
+    eks_pod_identity = optional(object({
+      namespace       = string
+      service_account = string
+      cluster_names   = optional(list(string))
+    }))
+
     # No oidc_issuer_host here: it is derived from oidc_provider_arn, because an
     # issuer given separately can disagree with the ARN and the resulting trust
     # policy fails silently at assume-role time rather than at plan time.
+    #
+    # Retained rather than removed now that Pod Identity is the default: IRSA is the
+    # only option on Fargate, on Windows nodes, and outside EKS proper.
     eks_irsa = optional(object({
       oidc_provider_arn = string
       namespace         = string
@@ -166,15 +195,16 @@ variable "trust" {
 
   validation {
     condition = contains(
-      ["github_oidc", "eks_irsa", "aws_service", "account_principal"],
+      ["github_oidc", "eks_pod_identity", "eks_irsa", "aws_service", "account_principal"],
       var.trust.type
     )
-    error_message = "trust.type must be one of: github_oidc, eks_irsa, aws_service, account_principal."
+    error_message = "trust.type must be one of: github_oidc, eks_pod_identity, eks_irsa, aws_service, account_principal."
   }
 
   validation {
     condition = length(compact([
       var.trust.github_oidc == null ? "" : "github_oidc",
+      var.trust.eks_pod_identity == null ? "" : "eks_pod_identity",
       var.trust.eks_irsa == null ? "" : "eks_irsa",
       var.trust.aws_service == null ? "" : "aws_service",
       var.trust.account_principal == null ? "" : "account_principal",
@@ -185,11 +215,38 @@ variable "trust" {
   validation {
     condition = (
       var.trust.type == "github_oidc" ? var.trust.github_oidc != null :
+      var.trust.type == "eks_pod_identity" ? var.trust.eks_pod_identity != null :
       var.trust.type == "eks_irsa" ? var.trust.eks_irsa != null :
       var.trust.type == "aws_service" ? var.trust.aws_service != null :
       var.trust.account_principal != null
     )
     error_message = "The supplied trust payload must match trust.type."
+  }
+
+  # Kubernetes namespace and ServiceAccount names are RFC 1123 labels. Checked here
+  # because a name the cluster cannot create is a role whose trust policy can never
+  # be satisfied — and nothing reports that, because the association is allowed to
+  # name objects that do not exist yet.
+  validation {
+    condition = alltrue([
+      for n in compact([
+        try(var.trust.eks_pod_identity.namespace, ""),
+        try(var.trust.eks_pod_identity.service_account, ""),
+        try(var.trust.eks_irsa.namespace, ""),
+        try(var.trust.eks_irsa.service_account, ""),
+      ]) : can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", n)) && length(n) <= 63
+    ])
+    error_message = "Kubernetes namespace and service_account must be RFC 1123 labels: lowercase alphanumeric or '-', starting and ending alphanumeric, at most 63 characters."
+  }
+
+  # An empty cluster_names list would emit an eks-cluster-name condition with no
+  # permitted values, which never matches. Omit the argument to mean "any cluster".
+  validation {
+    condition = (
+      try(var.trust.eks_pod_identity.cluster_names, null) == null ||
+      length(try(var.trust.eks_pod_identity.cluster_names, [])) > 0
+    )
+    error_message = "eks_pod_identity.cluster_names must be omitted (any cluster in this account) or contain at least one cluster name. An empty list produces a condition that never matches."
   }
 
   # Immutable subject claims: repositories created after 15 July 2026 use a `sub`

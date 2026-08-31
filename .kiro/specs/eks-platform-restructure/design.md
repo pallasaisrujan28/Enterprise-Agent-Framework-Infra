@@ -1846,9 +1846,9 @@ they are not interchangeable — see Security finding 3, part 2:
 | `${org_prefix}-${environment}-deployer-boundary` | Infrastructure roles: layer deployers | Denies reach — org and security actions, boundary removal, long-lived credentials, writes to higher layers' state |
 
 **5. Trust policies are built from typed inputs, not strings.** The module takes a
-discriminated `trust` object — one of `github_oidc`, `eks_pod_identity`, `eks_irsa`, `aws_service`, or
-`account_principal` — and constructs the policy. This is where the two most expensive
-IAM bugs in this repository live, so neither is left to a caller:
+discriminated `trust` object — one of `github_oidc`, `eks_pod_identity`, `eks_irsa`,
+`aws_service`, or `account_principal` — and constructs the policy. This is where the
+most expensive IAM bugs in this repository live, so none of them is left to a caller:
 
 - For `github_oidc`, the module emits the **immutable** subject form from
   `owner_id` and `repo_id` inputs, and takes a list of *contexts* — for example
@@ -1858,6 +1858,21 @@ IAM bugs in this repository live, so neither is left to a caller:
 - For `eks_irsa`, the module takes `namespace` and `service_account` and emits both
   the `:sub` and `:aud` conditions. Omitting `:aud` is a known way to make a trust
   policy far broader than intended, so it is not optional.
+- For `eks_pod_identity`, the module always emits the namespace and service-account
+  conditions. **AWS's own documented example trust policy carries no conditions at
+  all**, which permits any pod in any namespace in any cluster in the account —
+  strictly broader than the IRSA policy it replaces. The only barrier is
+  `iam:PassRole` on whoever creates the association, which is a permission on a
+  different principal rather than a property of the role. `cluster_names` is optional
+  and omitted by default, because pinning it forfeits the reuse-across-clusters
+  property that is a genuine advantage of the mechanism.
+
+  Two traps here, both of the silent-failure class: the conditions must use
+  `aws:RequestTag` and not `aws:PrincipalTag` (both key families take the same six tag
+  names — the request side is the trust policy, the principal side is for reading them
+  back in an identity or resource policy), and the statement must allow **both**
+  `sts:AssumeRole` and `sts:TagSession`, because EKS always sends session tags and the
+  assumption fails without the second.
 
 **6. `iam:PassRole` is always scoped.** Never `Resource: "*"`. The module takes an
 explicit list of role ARNs that may be passed. IAM Reference §6 explains why this
