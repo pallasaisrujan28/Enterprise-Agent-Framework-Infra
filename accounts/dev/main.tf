@@ -9,6 +9,11 @@
 module "baseline" {
   source = "../../modules/account-baseline"
 
+  # "eaf" is not a free choice here: it reproduces the existing resource names
+  # (eaf-workload-boundary, eaf-workload-ci-role, eaf-EAF-DEV-monthly) exactly.
+  # An IAM policy or role name change forces replacement, and the boundary is
+  # referenced by the workloads layer.
+  org_prefix   = "eaf"
   account_name = "EAF-DEV"
   environment  = "dev"
   region       = var.region
