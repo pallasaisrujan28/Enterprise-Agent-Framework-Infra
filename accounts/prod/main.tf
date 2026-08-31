@@ -9,6 +9,9 @@
 module "baseline" {
   source = "../../modules/account-baseline"
 
+  # Reproduces the existing names exactly. See the note in accounts/dev/main.tf:
+  # an IAM policy or role name change forces replacement.
+  org_prefix   = "eaf"
   account_name = "EAF-PROD"
   environment  = "prod"
   region       = var.region

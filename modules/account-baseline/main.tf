@@ -2,8 +2,14 @@ terraform {
   required_version = ">= 1.11"
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+      source = "hashicorp/aws"
+      # A MINIMUM, not a pessimistic pin. "~> 5.0" in a module forbids the caller
+      # from choosing a newer major — which is the root module's decision to make and
+      # its lock file's job to hold. Note this is deliberately not ">= 6.0.0": that
+      # would force a provider major upgrade on accounts/dev and accounts/prod, both
+      # of which are live. Raising the floor belongs in its own change, with a
+      # reviewed plan. See the note in variables.tf.
+      version = ">= 5.0.0"
     }
   }
 }
@@ -38,6 +44,35 @@ locals {
   repo_owner            = split("/", var.github_repository)[0]
   repo_name             = split("/", var.github_repository)[1]
   github_sub_any_branch = "repo:${local.repo_owner}@${var.github_repository_owner_id}/${local.repo_name}@${var.github_repository_id}:ref:refs/heads/*"
+
+  # ── Names, in one place ─────────────────────────────────────────────────────
+
+  boundary_name = "${var.org_prefix}-workload-boundary"
+  ci_role_name  = "${var.org_prefix}-workload-ci-role"
+  budget_name   = "${var.org_prefix}-${var.account_name}-monthly"
+
+  # The boundary's own ARN, CONSTRUCTED rather than read from the resource.
+  #
+  # This looks like the mistake the rest of this repository is careful to avoid, and
+  # it is worth saying why it is not. Two statements inside
+  # data.aws_iam_policy_document.workload_boundary have to name the boundary: one
+  # conditions role creation on it, the other forbids its removal. That document IS
+  # the body of aws_iam_policy.workload_boundary, so referencing
+  # aws_iam_policy.workload_boundary.arn from inside it is a self-reference and
+  # Terraform rejects the graph as a cycle. There is no attribute to depend on,
+  # because the thing being described does not exist yet.
+  #
+  # What CAN be removed is the drift risk. The name is declared once, above, and both
+  # the resource and this ARN are built from it — so a rename moves them together and
+  # it is not possible to change one and forget the other. Previously the string
+  # "eaf-workload-boundary" was written out four times.
+  boundary_arn = "arn:${local.partition}:iam::${local.account_id}:policy/${local.boundary_name}"
+
+  # The prefix on every OIDC condition key is the issuer host, taken from the
+  # provider this module creates rather than written out again. Same reason as
+  # modules/iam-role: an issuer that disagrees with its provider yields a trust
+  # policy that is valid JSON, applies cleanly, and never matches.
+  github_oidc_issuer_host = replace(var.github_oidc_issuer_url, "https://", "")
 }
 
 # S3 account-level public access block is NOT managed here.
@@ -132,7 +167,7 @@ data "aws_iam_policy_document" "workload_boundary" {
     condition {
       test     = "StringEquals"
       variable = "iam:PermissionsBoundary"
-      values   = ["arn:${local.partition}:iam::${local.account_id}:policy/eaf-workload-boundary"]
+      values   = [local.boundary_arn]
     }
   }
 
@@ -143,7 +178,7 @@ data "aws_iam_policy_document" "workload_boundary" {
       "iam:DeleteRolePermissionsBoundary",
       "iam:PutRolePermissionsBoundary",
     ]
-    resources = ["arn:${local.partition}:iam::${local.account_id}:policy/eaf-workload-boundary"]
+    resources = [local.boundary_arn]
   }
 
   statement {
@@ -162,7 +197,7 @@ data "aws_iam_policy_document" "workload_boundary" {
 }
 
 resource "aws_iam_policy" "workload_boundary" {
-  name        = "eaf-workload-boundary"
+  name        = local.boundary_name
   description = "Permissions boundary for workload CI roles. Caps what any CI-created role can do."
   policy      = data.aws_iam_policy_document.workload_boundary.json
 }
@@ -173,7 +208,7 @@ resource "aws_iam_policy" "workload_boundary" {
 # The bootstrap layers create one in the management account; member accounts
 # each need their own.
 resource "aws_iam_openid_connect_provider" "github" {
-  url            = "https://token.actions.githubusercontent.com"
+  url            = var.github_oidc_issuer_url
   client_id_list = ["sts.amazonaws.com"]
   # No thumbprint_list — AWS validates GitHub's certificate against its own
   # trusted CA store for this provider. Pinning a thumbprint causes outages
@@ -200,20 +235,20 @@ data "aws_iam_policy_document" "workload_ci_trust" {
 
     condition {
       test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
+      variable = "${local.github_oidc_issuer_host}:aud"
       values   = ["sts.amazonaws.com"]
     }
 
     condition {
       test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
+      variable = "${local.github_oidc_issuer_host}:sub"
       values   = [local.github_sub_any_branch]
     }
   }
 }
 
 resource "aws_iam_role" "workload_ci" {
-  name                 = "eaf-workload-ci-role"
+  name                 = local.ci_role_name
   description          = "Assumed by GitHub Actions in the workload repository to deploy to this account."
   assume_role_policy   = data.aws_iam_policy_document.workload_ci_trust.json
   max_session_duration = 3600
@@ -223,7 +258,7 @@ resource "aws_iam_role" "workload_ci" {
 
 # ── Budget alert ──────────────────────────────────────────────────────────────
 resource "aws_budgets_budget" "monthly" {
-  name         = "eaf-${var.account_name}-monthly"
+  name         = local.budget_name
   budget_type  = "COST"
   limit_amount = tostring(var.budget_limit_usd)
   limit_unit   = "USD"
