@@ -96,38 +96,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-          role-session-name: eaf-plan-${{ github.run_id }}
-
-      - name: plan workloads/eaf/dev
-        working-directory: workloads/eaf/dev
+      # REMOVED: the terraform plan of workloads/eaf/dev.
+      #
+      # It never checked anything. Follow the chain as it was:
+      #
+      #   - the job authenticated as eaf-bootstrap-plan-role, which lives in the
+      #     MANAGEMENT account 193027353132
+      #   - it planned workloads/eaf/dev, whose resources are all in EAF-DEV
+      #     718438899462
+      #   - provider.tf had no assume_role, so Terraform operated in the
+      #     management account
+      #   - -refresh=false meant it never read those resources
+      #
+      # So it compared configuration against the state file and never contacted
+      # the account the resources live in. It passed because it was not looking.
+      # The old comment attributed -refresh=false to the plan role being
+      # "read-only on state"; the real reason a refresh fails is that the provider
+      # was pointed at the wrong account.
+      #
+      # This cannot simply be fixed here. Restoring assume_role to provider.tf —
+      # which this change does, because the destroy needs it — makes this job fail
+      # outright: eaf-bootstrap-plan-role carries the AWS-managed ReadOnlyAccess,
+      # and that policy grants only sts:GetAccessKeyInfo, sts:GetCallerIdentity
+      # and sts:GetSessionToken. It has no sts:AssumeRole, so it cannot make the
+      # hop into EAF-DEV. That is why cff1ec9 removed the block in the first
+      # place — a real constraint, navigated in the wrong direction.
+      #
+      # A plan is worth having when it can read the resources it describes with
+      # refresh enabled. That needs a per-layer plan role with in-account read
+      # access, which arrives with L1/L2/L3. Planning a layer that is about to be
+      # deleted, from the wrong account, with refresh off, is not worth repairing.
+      #
+      # The job is kept as a placeholder so the graph and the per-layer plan jobs
+      # that replace it are a visible diff rather than a reappearance.
+      - name: no layer to plan
         run: |
-          set -euo pipefail
-          terraform init -input=false -no-color -backend-config=backend.hcl
-          # -refresh=false: plan role is read-only on state — state rm and import
-          # cannot write here. Deploy role fixes state permanently. After first
-          # successful deploy, remove -refresh=false (state is clean going forward).
-          terraform plan -no-color -input=false -lock-timeout=10m -refresh=false | tee plan.txt
-          grep -qE '^(Plan: |No changes)' plan.txt || { echo "no plan summary" >&2; exit 1; }
-
-      - name: summary
-        if: always()
-        working-directory: workloads/eaf/dev
-        run: |
-          {
-            echo "## plan"
-            echo '```'
-            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "workloads/eaf/dev is pending teardown; per-layer plans arrive with L1." \
+            >> "$GITHUB_STEP_SUMMARY"
 
   # ── 3. deploy — manual dispatch only, temporarily ──────────────────────────
   #
