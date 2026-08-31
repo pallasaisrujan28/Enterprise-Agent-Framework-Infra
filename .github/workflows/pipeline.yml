@@ -30,8 +30,12 @@ env:
 # WHEN EACH RUNS
 #
 #   any branch, push:   checks ✓   plan ✓   build-images —   deploy —
-#   main, push:         checks ✓   plan ✓   build-images ✓   deploy —
+#   main, push:         checks ✓   plan ✓   build-images —   deploy —
 #   main, dispatch:     checks ✓   plan ✓   build-images ✓   deploy ✓
+#
+# So a merge to main runs static checks and a plan, and changes nothing. Both
+# jobs that act on the world require a deliberate dispatch, which is how every
+# other workflow in this repository already behaves.
 #
 # Two deliberate properties, both explained at the jobs themselves:
 #
@@ -263,10 +267,49 @@ jobs:
   #
   # This job touches no Terraform state — it builds a container and pushes to
   # ECR — so decoupling it from deploy carries no state risk.
+  # DEFERRED to manual dispatch until Firecrawl is rebuilt (design Step 6).
+  #
+  # Decoupling this job from deploy let it run for the first time, and it failed
+  # honestly: Trivy found 3 HIGH advisories in pnpm 11.4.0 inside the upstream
+  # image, and the scan step uses exit-code: 1.
+  #
+  #   GHSA-72r4-9c5j-mj57  patch-remove deletes files outside patches/
+  #   GHSA-fr4h-3cph-29xv  hoisted install imports local node_modules
+  #   GHSA-qrv3-253h-g69c  path traversal in configDependencies
+  #
+  # These were never a regression — they were hidden. build-images had
+  # `needs: deploy`, deploy has failed every run for days, so these images had
+  # never been built or scanned at all. The .trivyignore lists CVE ids; these are
+  # GHSA ids, so nothing suppressed them.
+  #
+  # Why defer rather than suppress: nothing consumes these images (all three ECR
+  # repositories hold 0 images), the layer that creates those repositories is
+  # about to be destroyed, and Firecrawl is being rebuilt as five services on a
+  # pinned release. Suppressing advisories to green a build for images nothing
+  # uses, which breaks again at teardown when the repositories disappear, is
+  # motion without progress.
+  #
+  # TWO REAL FIXES, both due at Step 6 — do not simply suppress:
+  #
+  #   1. pnpm is declared as a single manifest field upstream, in
+  #      apps/api/package.json: "packageManager": "pnpm@11.4.0". Trivy reads the
+  #      manifest, not the installed binary. So the fix is a layer that does
+  #      `corepack prepare pnpm@11.8.0 --activate` AND corrects the field.
+  #      Patching only the field would silence the scanner while leaving the
+  #      vulnerable binary in place — do not do that.
+  #      Risk assessment meanwhile: all three advisories require running pnpm
+  #      operations. It is a build-time package manager in a runtime image, and
+  #      nothing in a running Firecrawl container invokes it.
+  #
+  #   2. images/firecrawl/Dockerfile pins `ghcr.io/firecrawl/firecrawl:latest`.
+  #      A floating tag means two builds produce different images and the scan
+  #      result is tied to nothing Git records — the same fault as :latest in the
+  #      Kubernetes manifests. Pin a release digest; upstream self-hosting docs
+  #      recommend a pinned version.
   build-images:
     name: build ${{ matrix.image.name }}
     needs: checks
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
