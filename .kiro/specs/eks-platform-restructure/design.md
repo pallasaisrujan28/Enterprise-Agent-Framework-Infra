@@ -9,9 +9,16 @@ validated only by a twenty-minute CI round trip.
 
 That pattern is not a discipline problem. It is what happens when structural
 faults interact, and none of them is visible from inside a single error message.
-This document names five structural faults, plus a sixth that is quieter and more
+This document names six structural faults, plus a seventh that is quieter and more
 expensive: the written record of *why* the system is shaped this way has drifted
 far enough from reality that it can no longer be used to reason.
+
+They are numbered RC1–RC7 in the order they were found, not the order they appear.
+RC5 is the documentation fault and reads as the closer; RC6 and RC7 were found
+later, while preparing the teardown, and both concern **ownership** — a layer
+depending on something it is itself responsible for creating. That is RC2's shape
+recurring in IAM and in cross-account authentication rather than in providers,
+which is the strongest evidence that the layer boundary was the root problem.
 
 The restructure has one goal, stated plainly: **replace `workloads/eaf/dev` with
 reusable modules applied through three layered root modules, and bring the
@@ -262,7 +269,7 @@ block, and each is visible in the code:
 |---|---|---|
 | Targeted phase-1 apply on `aws_eks_access_policy_association.*` | `pipeline.yml` deploy job | The apply is now two applies |
 | Phase 2 must re-plan | `pipeline.yml`: *"phase 1 changes state so saved plans go stale"* | **The reviewer-approved-plan guarantee is gone** |
-| `plan -refresh=false` | `pipeline.yml` plan job | Plan no longer compares against reality — the three-way agreement `TERRAFORM-NOTES.md` §8 relies on is broken |
+| `plan -refresh=false` | `pipeline.yml` plan job | Plan no longer compares against reality — and, as RC7 shows, it also concealed that the plan job was authenticated to the wrong account entirely |
 | `wait = false`, `wait_for_rollout = false` | `langfuse.tf` | Apply reports success before the release is healthy |
 | One Helm failure aborts unrelated AWS resources | observed | The `ebs-csi` timeout took the whole apply down |
 | Hardcoded `import` block with a literal account id | `eks.tf` | Not portable to prod; runs on every plan |
@@ -395,6 +402,74 @@ the platform disagree about the entire tool layer.
 **The fix.** See Delivery Ownership. The infra repository owns every Kubernetes
 object and all state; the application repository builds and pushes an
 immutable-tagged image and stops there.
+
+### RC7 — The cross-account hop was removed, and three things broke quietly
+
+*Found while preparing the teardown. It is the mechanism behind RC6 part one, and
+it explains why `-refresh=false` was load-bearing rather than merely lazy.*
+
+Commit `cff1ec9` (30 August) deleted the `assume_role` block from
+`workloads/eaf/dev/provider.tf`, and the matching `--role-arn` argument from the
+`helm` and `kubernetes` `exec` blocks. Its message: *"remove assume_role from
+provider.tf — deployer role is already in EAF-DEV"*. Accurate, and it does remove
+a hop.
+
+Before that commit the credential chain was:
+
+```
+GitHub OIDC
+  -> eaf-baseline-dev-role          (management 193027353132)
+  -> OrganizationAccountAccessRole  (EAF-DEV 718438899462)
+```
+
+Neither of those is declared in the workloads layer, so both survive destroying
+it. After the commit, the chain was a single hop to
+`eaf-workload-dev-deployer-role`, which **is** declared in the layer.
+
+**Consequence 1: the teardown stopped working.** `destroy-workloads.yml`
+succeeded on 29 August — run `33244371784`, *"Destroy complete! Resources: 71
+destroyed."* — authenticating as `eaf-baseline-dev-role` with the hop in place.
+It cannot authenticate today. The job declares `environment: dev`, so its OIDC
+subject is `...:environment:dev`, while the deployer role's trust accepts only
+`...:ref:refs/heads/*`. IAM Reference §3, live.
+
+**Consequence 2: a repository variable silently changed behaviour.** The workflow
+selects its role with
+`${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}`.
+On 29 August the first variable did not exist, so the expression fell through to
+the baseline role and worked. The variable was created eight hours later, at
+which point the expression began selecting a role that cannot be assumed from
+this workflow. **Adding a variable broke a workflow that does not mention it.** A
+`||` between two roles with different trust conditions is not a fallback, it is a
+hidden switch.
+
+**Consequence 3: the `plan` job has been passing without checking anything.**
+This is the quietest and the most misleading:
+
+| | |
+|---|---|
+| Authenticates as | `eaf-bootstrap-plan-role` — **management account** |
+| Plans | `workloads/eaf/dev` — resources all in **EAF-DEV** |
+| Provider | no `assume_role`, so Terraform operates in the management account |
+| Refresh | `-refresh=false`, so it never reads those resources |
+
+It compares configuration against the state file and never contacts the account
+the resources live in. It passes because it is not looking. The workflow comment
+attributes `-refresh=false` to the plan role being *"read-only on state"*; the
+actual reason a refresh fails is the wrong-account provider.
+
+And it cannot be repaired in place. `eaf-bootstrap-plan-role` carries the
+AWS-managed `ReadOnlyAccess`, whose only `sts` actions are
+`sts:GetAccessKeyInfo`, `sts:GetCallerIdentity` and `sts:GetSessionToken` —
+verified against the live policy document. **No `sts:AssumeRole`**, so it cannot
+make the hop. That is precisely why `cff1ec9` removed the block: restoring it
+fails the plan job. The constraint was real; the direction taken was wrong.
+
+**The fix.** Restore the hop, because the teardown needs it, and retire the plan
+of this layer rather than pretend it verifies something. A plan earns its place
+when it can read the resources it describes with refresh enabled, which requires
+a per-layer plan role holding in-account read access — L1 work. Per Correctness
+Property 3, no layer's plan is considered valid until refresh is on.
 
 ### RC5 — The documentation describes a system that does not exist
 
@@ -1294,13 +1369,36 @@ already takes `github_repository_owner_id` and `github_repository_id` as inputs.
 IAM Reference.
 
 **Phase 1 — destroy the resources.**
-`terraform destroy` in `workloads/eaf/dev`, run as the surviving role. Expect it to
-need more than one pass: the layer contains broken Helm releases, a `kubernetes`
-provider configured from a cluster the destroy is removing, and four Deployments
-with null identities in state. Where a Kubernetes-scoped resource cannot be
-destroyed because its provider can no longer authenticate, remove it from state and
-delete the underlying object directly — recorded as a deliberate step, with the
-exit code checked, not suppressed.
+
+*Revised: Phase 0 is no longer needed as originally written, because the tool for
+this already exists and the principal it needs already exists.*
+`destroy-workloads.yml` is a `workflow_dispatch` workflow with a typed `"destroy"`
+confirmation and an `environment: dev` gate. It clears a stranded lock, drops
+`kubernetes_*` and `helm_release.*` from state — which is the null-identity repair,
+already solved — and then destroys. It ran successfully on 29 August, removing 71
+resources.
+
+Three changes make it runnable again, all in `fix/restore-cross-account-provider`:
+
+1. **Restore the hop** in `provider.tf` (RC7), so Terraform operates in EAF-DEV
+   rather than the management account.
+2. **Name `eaf-baseline-dev-role` explicitly**, replacing the `||` expression that
+   silently began selecting an unassumable role when a variable was added.
+3. **Plan the destroy, then apply the saved plan.** Previously it went straight to
+   `terraform destroy -auto-approve`, so a 71-resource teardown ran with no
+   preview. Now the step summary records exactly what is removed, and the destroy
+   applies the plan that was computed rather than recomputing at apply time — the
+   same property Preserving the Reviewer-Approved Plan argues for.
+
+**No new role, no new boundary, no `account-baseline` change** is required to reach
+the teardown. `eaf-baseline-dev-role` already has everything needed: it lives in
+the management account so it survives, its trust requires `environment:dev` which
+the workflow provides, it holds state access to `workloads/dev/*`, and it holds
+`sts:AssumeRole` on `OrganizationAccountAccessRole`.
+
+The deployer-role migration into `modules/account-baseline`, and its purpose-built
+boundary, move to Step 3 — where they are needed for *applying* L1, not for
+destroying the old layer.
 
 The one thing that must not be improvised: **no `|| true`.** Security finding 2
 applies to the teardown as much as to the pipeline. If a destroy step fails, it

@@ -43,9 +43,32 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      # eaf-baseline-dev-role explicitly, not a `||` fallback.
+      #
+      # The previous expression was:
+      #   ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
+      #
+      # That is a latent trap. It worked on 29 August only because
+      # AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN did not exist yet, so it fell through to
+      # the baseline role and destroyed 71 resources cleanly (run 33244371784).
+      # The variable was created eight hours later, at which point the expression
+      # silently began selecting the deployer role instead — and that role cannot
+      # be assumed from this workflow at all, because this job declares
+      # `environment: dev`, making the OIDC subject `...:environment:dev`, while
+      # the deployer role's trust accepts only `...:ref:refs/heads/*`.
+      #
+      # So adding a repository variable broke a workflow that did not mention it.
+      # A `||` between two roles with different trust conditions is not a fallback,
+      # it is a hidden switch. Named explicitly now.
+      #
+      # eaf-baseline-dev-role is the right principal: it lives in the management
+      # account so it survives destroying this layer, its trust requires
+      # `environment:dev` which this job provides, it can read and write
+      # workloads/dev/* state, and it holds sts:AssumeRole on
+      # OrganizationAccountAccessRole — which provider.tf now assumes into.
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN || vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-destroy-${{ github.run_id }}
 
@@ -74,8 +97,41 @@ jobs:
             | grep -E '^(kubernetes_|helm_release\.)' \
             | xargs -r terraform state rm
 
+      # Show what will be removed, and apply exactly that.
+      #
+      # Previously this went straight to `terraform destroy -auto-approve`, so a
+      # 71-resource teardown ran with no preview. The saved plan makes the destroy
+      # reviewable after the fact — the step summary records precisely what was
+      # removed — and it means the destroy applies the plan that was computed,
+      # rather than recomputing at apply time.
+      - name: plan the destroy
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          terraform plan -destroy -no-color -input=false -lock-timeout=30m \
+            -out=tfplan-destroy | tee destroy-plan.txt
+          grep -qE '^(Plan: |No changes)' destroy-plan.txt || {
+            echo "no plan summary — refusing to destroy" >&2; exit 1; }
+
+      - name: destroy summary
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: |
+          {
+            echo "## destroy plan for ${{ inputs.target }}"
+            echo '```'
+            grep -E '^(Plan: |No changes)' destroy-plan.txt
+            echo '```'
+            echo "<details><summary>resources to be destroyed</summary>"
+            echo
+            echo '```'
+            grep -E '^  # ' destroy-plan.txt || echo "(none listed)"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: destroy aws resources
         working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           set -euo pipefail
-          terraform destroy -no-color -input=false -lock-timeout=30m -auto-approve
+          # Applies the saved plan, not a freshly computed one.
+          terraform apply -no-color -input=false -lock-timeout=30m tfplan-destroy
