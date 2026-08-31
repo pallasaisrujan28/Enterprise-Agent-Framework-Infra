@@ -1494,7 +1494,7 @@ API *before* destroying the cluster, so reclaim policies get the chance to fire.
 |---|---|---|
 | Everything under `bootstrap/` | `bootstrap/seed`, `bootstrap/org-structure` | Untouched. Includes the state bucket itself and the OIDC provider in the management account |
 | `accounts/dev`, `accounts/prod` state | `accounts/*` | Untouched |
-| `eaf-workload-boundary` | `accounts/dev` | `iam.tf` references it by literal ARN, so it must exist before L1 applies |
+| `eaf-workload-boundary` | `accounts/dev` | Must exist before L1 applies. The literal-ARN reference it used to require is now avoidable: `modules/account-baseline` exposes `workload_boundary_arn` and `workload_boundary_name`, so L1 can read them from `accounts/dev` remote state instead |
 | `eaf-workload-ci-role` | `accounts/dev` | Survives; gains policies in Phase 0 |
 | The new deployer role | `accounts/dev` after Phase 0 | The principal that runs Phases 1 and 2 |
 | `EAF-DEV` account itself, SCPs, OU membership | `bootstrap/org-structure` | Untouched |
@@ -1689,7 +1689,7 @@ comparison. Both are fixable in code.
 | Layer | Scheme | Example |
 |---|---|---|
 | `bootstrap/seed` | `${var.org_prefix}-<purpose>-role` | `eaf-bootstrap-plan-role` |
-| `modules/account-baseline` | hardcoded literal | `eaf-workload-ci-role` |
+| `modules/account-baseline` | ~~hardcoded literal~~ → `${var.org_prefix}-workload-<purpose>-role` | `eaf-workload-ci-role` |
 | `workloads/eaf/dev` | mixed — `${var.cluster_name}-<purpose>-role` *and* hardcoded | `eaf-dev-agent-role`, `eaf-agent-ci-role` |
 
 Given a role name in the console, there is no rule that tells you which layer owns
@@ -1700,6 +1700,13 @@ and neither name says "workloads".
 `eaf-workload-ci-role` with no environment segment, so applying it to prod produces a
 role of the same name in a different account. Not a collision, but you cannot tell
 from a name or an ARN fragment which account you are looking at.
+
+*Still true, and deliberately left alone when `org_prefix` was introduced.* Adding the
+segment renames the role, an IAM role name is immutable, so the rename is a
+destroy-and-create of a role that survives workload teardown and is referenced by
+`AWS_BASELINE_DEV_ROLE_ARN`. The rename is worth doing, and it needs a plan reviewed
+against live state plus a `moved` block — not a drive-by inside a portability fix. The
+same reasoning kept the `~> 5.0` → `>= 6.0.0` bump out.
 
 **No inventory, so no way to spot an orphan.** There is no artefact listing the roles
 the platform is supposed to have. The only way to answer "should this role exist?" is
@@ -1860,19 +1867,94 @@ The module is genuinely parameterised — `account_name`, `environment` with a
 `accounts/dev` and `accounts/prod`. Five things stop it being portable, and all
 are fixed as part of Teardown Phase 0 rather than later:
 
-| Defect | Where | Fix |
-|---|---|---|
-| `eaf-workload-boundary` and `eaf-workload-ci-role` are hardcoded literals, and the boundary ARN is rebuilt as a literal string in two policy documents | `main.tf:135,146,165,216` | An `org_prefix` input, as `bootstrap/seed` already has. Reference the boundary by `aws_iam_policy.workload_boundary.arn`, not a constructed string |
-| `github_repository_owner_id` **defaults** to `194785418` | `variables.tf` | Remove the default. A per-organisation fact must be supplied |
-| Budget name `eaf-${var.account_name}-monthly` hardcodes the prefix | `main.tf:226` | `${var.org_prefix}-${var.account_name}-monthly` |
-| `region` **defaults** to `"eu-west-2"` | `variables.tf:45` | Remove the default. A module that guesses its region is not portable, and the guess is invisible at the call site |
-| Provider constraint is `~> 5.0` | `main.tf:6` | `>= 6.0.0`. A pessimistic constraint in a *module* forbids the caller from choosing a newer major, which is the root module's decision to make and its lock file's job to pin |
+| Defect | Where | Fix | Status |
+|---|---|---|---|
+| `eaf-workload-boundary` and `eaf-workload-ci-role` are hardcoded literals, and the boundary ARN is rebuilt as a literal string four times | `main.tf:135,146,165,216` | An `org_prefix` input, as `bootstrap/seed` already has. Name declared once in a local; the ARN derived from that same local | **done** |
+| `github_repository_owner_id` **defaults** to `194785418` | `variables.tf` | Remove the default. A per-organisation fact must be supplied | **done** |
+| Budget name `eaf-${var.account_name}-monthly` hardcodes the prefix | `main.tf:226` | `${var.org_prefix}-${var.account_name}-monthly` | **done** |
+| `region` **defaults** to `"eu-west-2"` | `variables.tf:45` | Remove the default. A module that guesses its region is not portable, and the guess is invisible at the call site | **done** |
+| Provider constraint is `~> 5.0` | `main.tf:6` | `>= 5.0.0` — see below | **partly** |
+| `token.actions.githubusercontent.com` written out three times, including as a condition-key prefix | `main.tf` | Property 19: the issuer host is derived from the provider URL, which becomes an input | **done** |
+| `aws_guardduty_detector.datasources` is deprecated in favour of `aws_guardduty_detector_feature` | `main.tf:86` | Deferred — see below | **open** |
 
-Note the boundary ARN being constructed as a string rather than referenced as an
-attribute: that is the same class of error as the literal-ARN reference from
-`workloads/eaf/dev` to `eaf-workload-boundary`. A string does not create a
-dependency edge, so Terraform cannot know the policy must exist first, and a rename
-breaks silently at apply time instead of loudly at plan time.
+### Correction: the stated fix for the boundary ARN was impossible
+
+This table previously said to *"reference the boundary by
+`aws_iam_policy.workload_boundary.arn`, not a constructed string."* **That cannot be
+done, and attempting it deadlocks the graph.**
+
+The two statements that name the boundary — `AllowIAMWithBoundary`, which conditions
+role creation on it, and `DenyBoundaryRemoval`, which forbids its removal — live
+*inside* `data.aws_iam_policy_document.workload_boundary`. That document **is** the
+`policy` body of `aws_iam_policy.workload_boundary`. Referencing that resource's `.arn`
+from within its own body is a self-reference, and Terraform rejects it as a cycle.
+There is no attribute to depend on, because the thing being described does not exist
+yet. This is the same shape as RC2 — a value needed before the resource that produces
+it can exist — arrived at from the opposite direction.
+
+So the ARN stays constructed, and what is removed is the *drift risk* instead: the name
+is declared once as `local.boundary_name`, and both `aws_iam_policy.workload_boundary`
+and `local.boundary_arn` are built from it. A rename now moves them together. Pinned by
+`boundary_arn_cannot_drift_from_the_boundary_name`, which asserts the constructed ARN
+and the policy's actual name agree — the guarantee the missing attribute reference
+would have given.
+
+*The general rule still holds: prefer an attribute reference, because a string creates
+no dependency edge. This is a genuine exception, and it is worth knowing which is
+which.*
+
+### Why the provider constraint moved to `>= 5.0.0`, not `>= 6.0.0`
+
+The defect is the **shape**. A pessimistic `~> 5.0` inside a module forbids the caller
+from selecting a newer major, which is the root module's decision and its lock file's
+job to hold. `>= 5.0.0` fixes that and changes no resolved version.
+
+Raising the floor to 6.x is a different change with a different risk profile:
+`accounts/dev` and `accounts/prod` are **live**, neither commits a `.terraform.lock.hcl`,
+and a provider major upgrade wants a reviewed plan against real state. Bundling it here
+would hide a behavioural change inside a rename. It gets its own PR, as does the
+GuardDuty `datasources` deprecation — both are behavioural, both touch live resources,
+and neither is a portability defect.
+
+*Confirmed rather than assumed:* a local `terraform init` in `accounts/dev` after the
+change resolved `constraints = ">= 5.0.0, ~> 5.0"` to `5.100.0`. The root module's
+`~> 5.0` in `provider.tf` still holds the version, which is the point — the module
+stopped dictating, and the layer decides.
+
+### A trap when closing the Property 8 gap
+
+`accounts/*` commit no lock file, which Property 8 wants fixed. **Do not fix it by
+committing a lock file generated on a workstation.** `terraform init` records hashes only
+for the current platform, so a macOS-generated lock file omits `linux_amd64` and CI then
+fails with *"provider does not have a package available for your current platform"* —
+a failure that looks like a registry problem and is not.
+
+The lock file has to be generated for every platform that runs it:
+
+```
+terraform providers lock \
+  -platform=darwin_arm64 -platform=darwin_amd64 -platform=linux_amd64
+```
+
+### Verification available for this module
+
+Its state lives in the management account's bucket and is not reachable from a
+workstation, so *a plan against real state was not available* to confirm that
+introducing `org_prefix` renames nothing. An IAM policy or role name is immutable, so a
+name change forces replacement — and the boundary is referenced by the workloads layer.
+
+In place of a plan, `modules/account-baseline/tests/` pins the three live names as
+literals (`eaf-workload-boundary`, `eaf-workload-ci-role`, `eaf-EAF-DEV-monthly`) and
+`accounts/{dev,prod}` pass `org_prefix = "eaf"`, which reproduces them exactly. A future
+edit to how a name is built fails offline rather than proposing a replacement against a
+real account. **This is weaker than a reviewed plan and should be treated as such: the
+first apply of `accounts/dev` after this merges wants a human reading the plan for
+`replace`.**
+
+One honest limitation of these tests: `mock_provider` stubs every data source,
+including `aws_iam_policy_document`, whose `json` is computed by the provider. They
+therefore assert generated names and the constructed ARN — plain locals, read through
+the new `inventory` output — and not the rendered policy JSON.
 
 ---
 
