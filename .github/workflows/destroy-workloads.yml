@@ -1,5 +1,27 @@
+# TWO MODES, and the safe one is the default.
+#
+#   plan_only = true  (default)  read-only. Lists what is tracked in state and
+#                                what a destroy would remove, then STOPS. Takes no
+#                                state lock, mutates nothing, deletes nothing.
+#
+#   plan_only = false            the real teardown. Clears a stranded lock, drops
+#                                kubernetes_* and helm_release.* from state, plans
+#                                the destroy to a saved file, and applies THAT
+#                                file.
+#
+# Why the default is the dry run: an accidental dispatch should show you something,
+# not delete a cluster. The typed `confirm` field is a second gate, but a default
+# that destroys makes the confirmation the only thing standing between a misclick
+# and 71 destroyed resources.
+#
+# Why two dispatches rather than one job with an approval pause: the `dev`
+# environment has no protection rules, so `environment: dev` does not pause
+# anything here — it exists to shape the OIDC subject claim, which is what makes
+# eaf-baseline-dev-role assumable. A pause would need required reviewers on dev.
+# Two dispatches achieve the same outcome without changing the environment's
+# protection, and give the reviewer the plan output in between.
 name: Destroy workloads
-run-name: "Destroy ${{ inputs.target }} by @${{ github.actor }}"
+run-name: "${{ inputs.plan_only && 'DRY RUN' || 'DESTROY' }} ${{ inputs.target }} by @${{ github.actor }}"
 
 on:
   workflow_dispatch:
@@ -10,8 +32,13 @@ on:
         type: choice
         options:
           - dev
+      plan_only:
+        description: "Dry run — show what would be destroyed and stop. Leave checked unless you intend to destroy."
+        required: false
+        type: boolean
+        default: true
       confirm:
-        description: 'Type "destroy" to confirm permanent deletion'
+        description: 'Type "destroy" to confirm permanent deletion (ignored when plan_only is checked)'
         required: true
         type: string
 
@@ -32,10 +59,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: check confirmation
+        if: ${{ !inputs.plan_only }}
         run: |
           if [[ "${{ inputs.confirm }}" != "destroy" ]]; then
             echo "type 'destroy' in the confirm field to proceed" >&2
             exit 1
+          fi
+
+      - name: announce mode
+        run: |
+          if [[ "${{ inputs.plan_only }}" == "true" ]]; then
+            echo "::notice::DRY RUN — nothing will be destroyed or modified."
+          else
+            echo "::warning::DESTROY — this run will permanently delete ${{ inputs.target }} workloads."
           fi
 
       - uses: hashicorp/setup-terraform@v3
@@ -72,7 +108,11 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-destroy-${{ github.run_id }}
 
+      # Deleting a lock object is a mutation, so it does not happen in a dry run.
+      # If a lock is genuinely stranded, the dry run fails with a lock error — which
+      # is information you want, not something to paper over silently.
       - name: clear stuck state lock
+        if: ${{ !inputs.plan_only }}
         working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           # S3 native locking (use_lockfile=true) leaves a .tflock object when a
@@ -85,7 +125,69 @@ jobs:
         working-directory: workloads/eaf/${{ inputs.target }}
         run: terraform init -input=false -no-color -backend-config=backend.hcl
 
+      # ── DRY RUN path ─────────────────────────────────────────────────────────
+      #
+      # -lock=false because a preview has no business holding the state lock, and
+      # -refresh=false because refreshing would drive the kubernetes and helm
+      # providers, which are configured from a cluster this plan does not touch and
+      # which carry the null identities the real run removes. Neither flag is
+      # acceptable for an apply; both are correct for a read-only preview, and the
+      # summary says so plainly rather than implying more precision than it has.
+      - name: dry run — what is tracked and what would be destroyed
+        if: ${{ inputs.plan_only }}
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          terraform state list > state-list.txt
+          echo "resources in state: $(wc -l < state-list.txt)"
+          terraform plan -destroy -no-color -input=false -lock=false -refresh=false \
+            | tee destroy-preview.txt
+          grep -qE '^(Plan: |No changes)' destroy-preview.txt || {
+            echo "no plan summary produced" >&2; exit 1; }
+
+      - name: dry run summary
+        if: ${{ inputs.plan_only }}
+        working-directory: workloads/eaf/${{ inputs.target }}
+        run: |
+          {
+            echo "# DRY RUN — nothing was destroyed"
+            echo
+            echo "Target: \`${{ inputs.target }}\`"
+            echo
+            echo '```'
+            grep -E '^(Plan: |No changes)' destroy-preview.txt
+            echo '```'
+            echo
+            echo "Computed with \`-refresh=false -lock=false\`, so this reflects what"
+            echo "**state** describes, not a re-read of AWS. Counts may differ slightly"
+            echo "from the real run, which refreshes."
+            echo
+            echo "The real run additionally drops \`kubernetes_*\` and \`helm_release.*\`"
+            echo "from state before planning — those objects are deleted by the cluster"
+            echo "teardown rather than through their own providers."
+            echo
+            echo "<details><summary>resources tracked in state ($(wc -l < state-list.txt))</summary>"
+            echo
+            echo '```'
+            cat state-list.txt
+            echo '```'
+            echo "</details>"
+            echo
+            echo "<details><summary>resources a destroy would remove</summary>"
+            echo
+            echo '```'
+            grep -E '^  # ' destroy-preview.txt || echo "(none listed)"
+            echo '```'
+            echo "</details>"
+            echo
+            echo "---"
+            echo "To execute: dispatch again with **plan_only unchecked** and \`confirm = destroy\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── REAL TEARDOWN path ───────────────────────────────────────────────────
+
       - name: drop k8s and helm resources from state
+        if: ${{ !inputs.plan_only }}
         working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           set -euo pipefail
@@ -105,6 +207,7 @@ jobs:
       # removed — and it means the destroy applies the plan that was computed,
       # rather than recomputing at apply time.
       - name: plan the destroy
+        if: ${{ !inputs.plan_only }}
         working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           set -euo pipefail
@@ -114,14 +217,16 @@ jobs:
             echo "no plan summary — refusing to destroy" >&2; exit 1; }
 
       - name: destroy summary
+        if: ${{ !inputs.plan_only }}
         working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           {
-            echo "## destroy plan for ${{ inputs.target }}"
+            echo "# DESTROY — ${{ inputs.target }}"
+            echo
             echo '```'
             grep -E '^(Plan: |No changes)' destroy-plan.txt
             echo '```'
-            echo "<details><summary>resources to be destroyed</summary>"
+            echo "<details><summary>resources destroyed</summary>"
             echo
             echo '```'
             grep -E '^  # ' destroy-plan.txt || echo "(none listed)"
@@ -130,6 +235,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: destroy aws resources
+        if: ${{ !inputs.plan_only }}
         working-directory: workloads/eaf/${{ inputs.target }}
         run: |
           set -euo pipefail
