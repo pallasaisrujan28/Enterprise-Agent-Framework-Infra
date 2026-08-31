@@ -1,0 +1,370 @@
+# Unit tests for modules/iam-role.
+#
+# Every run block uses `command = plan`, so nothing is created and no AWS
+# credentials are needed. This is the module half of Step 1's local loop: it runs
+# in seconds, offline, and catches the two classes of IAM error that have cost this
+# project the most time.
+#
+# Half of these tests assert that BAD input is rejected. A guardrail nobody has
+# seen fail is not known to work.
+
+# No credentials, deliberately and verifiably.
+#
+# The three skip_* flags stop the provider trying to validate credentials, look up
+# the account id, or reach the EC2 instance metadata endpoint during
+# initialisation. With those off, a plan of resources whose values are all known
+# from configuration needs no AWS access at all.
+#
+# Verified: this suite passes with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+# AWS_SESSION_TOKEN, AWS_PROFILE and AWS_DEFAULT_REGION all unset.
+#
+# An earlier revision set access_key = "mock" / secret_key = "mock" here. They were
+# unnecessary, and a committed file containing something shaped like a credential is
+# noise for a reviewer and for secret scanning. Removed.
+provider "aws" {
+  region                      = "eu-west-2"
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+
+variables {
+  org_prefix   = "eaf"
+  environment  = "dev"
+  layer        = "platform"
+  purpose      = "deployer"
+  description  = "Assumed by the infra pipeline to apply the platform layer."
+  owner        = "platform-team"
+  boundary_arn = "arn:aws:iam::111122223333:policy/eaf-dev-deployer-boundary"
+
+  trust = {
+    type = "github_oidc"
+    github_oidc = {
+      oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+      owner             = "pallasaisrujan28"
+      owner_id          = "194785418"
+      repository        = "Enterprise-Agent-Framework-Infra"
+      repository_id     = "1324052608"
+      contexts          = ["environment:dev"]
+    }
+  }
+}
+
+# ── Naming ────────────────────────────────────────────────────────────────────
+
+run "name_is_generated_from_identity" {
+  command = plan
+
+  assert {
+    condition     = aws_iam_role.this.name == "eaf-dev-platform-deployer-role"
+    error_message = "Expected generated name eaf-dev-platform-deployer-role, got ${aws_iam_role.this.name}"
+  }
+}
+
+run "mandatory_tags_are_present_and_not_overridable" {
+  command = plan
+
+  variables {
+    # Attempt to override a mandatory tag. The module merges extra_tags FIRST, so
+    # the generated value must win.
+    extra_tags = { ManagedBy = "definitely-not-terraform", CostCentre = "CC-1001" }
+  }
+
+  assert {
+    condition     = aws_iam_role.this.tags["ManagedBy"] == "terraform"
+    error_message = "extra_tags overrode a mandatory tag: ManagedBy is ${aws_iam_role.this.tags["ManagedBy"]}"
+  }
+
+  assert {
+    condition     = aws_iam_role.this.tags["Layer"] == "platform"
+    error_message = "Layer tag missing or wrong — it is the locator for which directory owns the role."
+  }
+
+  assert {
+    condition     = aws_iam_role.this.tags["CostCentre"] == "CC-1001"
+    error_message = "extra_tags should still be merged for non-mandatory keys."
+  }
+}
+
+# ── GitHub OIDC trust ─────────────────────────────────────────────────────────
+
+run "github_oidc_emits_immutable_subject" {
+  command = plan
+
+  assert {
+    condition = contains(
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringLike["token.actions.githubusercontent.com:sub"],
+      "repo:pallasaisrujan28@194785418/Enterprise-Agent-Framework-Infra@1324052608:environment:dev"
+    )
+    error_message = "Immutable subject not emitted. A trust policy in the legacy repo:owner/repo form silently never matches."
+  }
+
+  assert {
+    condition = (
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
+    )
+    error_message = "aud condition missing. Without it the trust policy is broader than intended."
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Action == "sts:AssumeRoleWithWebIdentity"
+    error_message = "OIDC federation requires sts:AssumeRoleWithWebIdentity, not sts:AssumeRole."
+  }
+}
+
+run "github_oidc_legacy_subject_when_immutable_disabled" {
+  command = plan
+
+  variables {
+    trust = {
+      type = "github_oidc"
+      github_oidc = {
+        oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+        owner             = "octo-org"
+        repository        = "octo-repo"
+        immutable_subject = false
+        contexts          = ["ref:refs/heads/main"]
+      }
+    }
+  }
+
+  assert {
+    condition = contains(
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringLike["token.actions.githubusercontent.com:sub"],
+      "repo:octo-org/octo-repo:ref:refs/heads/main"
+    )
+    error_message = "Legacy subject form not emitted when immutable_subject = false."
+  }
+}
+
+run "reject_immutable_subject_without_ids" {
+  command = plan
+
+  variables {
+    trust = {
+      type = "github_oidc"
+      github_oidc = {
+        oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+        owner             = "octo-org"
+        repository        = "octo-repo"
+        contexts          = ["environment:dev"]
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
+}
+
+run "reject_bare_branch_name_as_context" {
+  command = plan
+
+  variables {
+    trust = {
+      type = "github_oidc"
+      github_oidc = {
+        oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+        owner             = "octo-org"
+        owner_id          = "1"
+        repository        = "octo-repo"
+        repository_id     = "2"
+        contexts          = ["main"]
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
+}
+
+run "reject_empty_context_list" {
+  command = plan
+
+  variables {
+    trust = {
+      type = "github_oidc"
+      github_oidc = {
+        oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+        owner             = "octo-org"
+        owner_id          = "1"
+        repository        = "octo-repo"
+        repository_id     = "2"
+        contexts          = []
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
+}
+
+run "reject_payload_not_matching_declared_type" {
+  command = plan
+
+  variables {
+    trust = {
+      type = "eks_irsa"
+      github_oidc = {
+        oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/token.actions.githubusercontent.com"
+        owner             = "octo-org"
+        owner_id          = "1"
+        repository        = "octo-repo"
+        repository_id     = "2"
+        contexts          = ["environment:dev"]
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
+}
+
+# ── IRSA trust ────────────────────────────────────────────────────────────────
+
+run "irsa_emits_both_sub_and_aud" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "agent"
+    trust = {
+      type = "eks_irsa"
+      eks_irsa = {
+        oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/oidc.eks.eu-west-2.amazonaws.com/id/ABCDEF"
+        oidc_issuer_host  = "oidc.eks.eu-west-2.amazonaws.com/id/ABCDEF"
+        namespace         = "eaf"
+        service_account   = "eaf-agent"
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.eu-west-2.amazonaws.com/id/ABCDEF:sub"] == "system:serviceaccount:eaf:eaf-agent"
+    )
+    error_message = "IRSA sub condition wrong or missing."
+  }
+
+  assert {
+    condition = (
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.eu-west-2.amazonaws.com/id/ABCDEF:aud"] == "sts.amazonaws.com"
+    )
+    error_message = "IRSA aud condition missing — a documented way to make the trust policy too broad."
+  }
+}
+
+# ── Permissions boundary ──────────────────────────────────────────────────────
+
+run "reject_no_boundary_and_no_exemption" {
+  command = plan
+
+  variables {
+    boundary_arn = null
+  }
+
+  expect_failures = [var.boundary_exemption_reason]
+}
+
+run "reject_both_boundary_and_exemption" {
+  command = plan
+
+  variables {
+    boundary_arn              = "arn:aws:iam::111122223333:policy/eaf-dev-deployer-boundary"
+    boundary_exemption_reason = "This role is exempt for a reason that is long enough."
+  }
+
+  expect_failures = [var.boundary_exemption_reason]
+}
+
+run "accept_explicit_boundary_exemption" {
+  command = plan
+
+  variables {
+    boundary_arn              = null
+    boundary_exemption_reason = "Management account bootstrap role; no workload boundary exists in that account."
+  }
+
+  assert {
+    condition     = aws_iam_role.this.tags["Boundary"] == "EXEMPT"
+    error_message = "An exempt role must be tagged EXEMPT so the inventory can surface it."
+  }
+}
+
+# ── PassRole scoping ──────────────────────────────────────────────────────────
+
+run "pass_role_generates_scoped_policy" {
+  command = plan
+
+  variables {
+    pass_role_arns = [
+      "arn:aws:iam::111122223333:role/eaf-dev-platform-cluster-role",
+      "arn:aws:iam::111122223333:role/eaf-dev-platform-node-role",
+    ]
+  }
+
+  assert {
+    condition     = contains(keys(aws_iam_role_policy.inline), "scoped-pass-role")
+    error_message = "Expected a generated scoped-pass-role inline policy."
+  }
+
+  assert {
+    condition = length(
+      jsondecode(aws_iam_role_policy.inline["scoped-pass-role"].policy).Statement[0].Resource
+    ) == 2
+    error_message = "PassRole policy should name exactly the two supplied role ARNs."
+  }
+}
+
+run "reject_wildcard_pass_role" {
+  command = plan
+
+  variables {
+    pass_role_arns = ["*"]
+  }
+
+  expect_failures = [var.pass_role_arns]
+}
+
+# ── Identity validation ───────────────────────────────────────────────────────
+
+run "reject_non_kebab_purpose" {
+  command = plan
+
+  variables {
+    purpose = "Deployer_Role"
+  }
+
+  expect_failures = [var.purpose]
+}
+
+run "reject_unknown_layer" {
+  command = plan
+
+  variables {
+    layer = "workloads"
+  }
+
+  expect_failures = [var.layer]
+}
+
+run "reject_short_description" {
+  command = plan
+
+  variables {
+    description = "deployer"
+  }
+
+  expect_failures = [var.description]
+}
+
+# ── Exclusivity ───────────────────────────────────────────────────────────────
+
+run "exclusive_management_on_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(aws_iam_role_policies_exclusive.this) == 1
+    error_message = "Exclusive inline-policy management should be enabled by default — it is what makes out-of-band drift self-correcting."
+  }
+
+  assert {
+    condition     = length(aws_iam_role_policy_attachments_exclusive.this) == 1
+    error_message = "Exclusive managed-policy-attachment management should be enabled by default."
+  }
+}
