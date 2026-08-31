@@ -739,7 +739,8 @@ composed, and it reintroduces RC2 one level down.
 | Module | Consumed by | Responsibility |
 |---|---|---|
 | `modules/network` | L1 | VPC, public and private subnets, IGW, NAT, route tables. Subnet count driven by an AZ-count input, not hardcoded |
-| `modules/eks-cluster` | L1 | Cluster, OIDC provider, security groups, access entries, addons with correct ordering |
+| `modules/eks-cluster` | L1 | Cluster and access entries. **No OIDC provider** — Pod Identity needs none. **No add-ons**: see `modules/eks-addon` and the note below |
+| `modules/eks-addon` | L1 | ONE add-on plus its Pod Identity association. Called once per add-on, because add-on ordering relative to the node group cannot be expressed from inside a module |
 | `modules/eks-node-group` | L1 | One managed node group. Called once per pool; taints and labels are inputs, and it **outputs them** so L3 can derive tolerations rather than restating them |
 | `modules/iam-role` | L1, `accounts/*` | **The only** way any role is created. Generated name, mandatory tags, required boundary, typed trust (`github_oidc` / `eks_pod_identity` / `eks_irsa` / `aws_service` / `account_principal`), scoped `PassRole`. See IAM Role Design |
 | `modules/ecr-repository` | L1 | One repository with lifecycle policy, scan-on-push, KMS, immutable tags |
@@ -752,6 +753,27 @@ composed, and it reintroduces RC2 one level down.
 
 `modules/account-baseline` is the proof the pattern works here — it is already
 consumed by both `accounts/dev` and `accounts/prod` from a single source.
+
+### Why add-ons are their own module, and one per call
+
+The obvious design gives `modules/eks-cluster` the add-ons, as the table above
+originally did. It cannot work.
+
+Add-ons sit at two different points in the graph. `vpc-cni`, `kube-proxy` and
+`eks-pod-identity-agent` must be `ACTIVE` **before** a node group exists — a node
+joining a cluster with no CNI fails with `NodeCreationFailure: NetworkPluginNotReady`
+and stays `NotReady`. `coredns` and `aws-ebs-csi-driver` must come **after**, because
+their pods have nowhere to schedule on an empty cluster and the add-on sits `DEGRADED`
+until Terraform times out.
+
+To express the second half from inside `eks-cluster`, the module would have to accept a
+node-group value as an input. **A module input makes the whole module wait**, so the
+cluster would depend on the node group, which depends on the cluster. A cycle — the same
+shape as RC2, a value needed before the resource that produces it can exist.
+
+So each add-on is one module call and each call site declares its own `depends_on`,
+where both objects are visible. Ordering is a property of the composition, not of any
+add-on.
 
 ### Conventions
 
