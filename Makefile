@@ -2,10 +2,14 @@ SHELL := /bin/bash
 .PHONY: fmt fmt-check lint validate check install-hooks test iam-inventory iam-orphans
 
 # Layers whose state may contain IAM roles. Used by the IAM inventory and orphan
-# checks. Add new layers here as they are created — a layer missing from this list
-# would make its roles look like orphans.
-IAM_LAYERS := accounts/dev accounts/prod workloads/eaf/dev/platform \
-              workloads/eaf/dev/cluster-addons workloads/eaf/dev/apps
+# checks. ADD NEW LAYERS HERE AS THEY ARE CREATED — a layer missing from this list
+# makes its roles look like orphans, and the orphan check deliberately refuses to
+# report at all rather than name a managed role as unmanaged.
+#
+# workloads/eaf/dev/{platform,cluster-addons,apps} are appended at design Steps 3
+# and 4, when those directories exist. They are not listed pre-emptively because
+# the check treats a missing directory as an error, not as an empty layer.
+IAM_LAYERS := accounts/dev accounts/prod
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
 
@@ -66,6 +70,22 @@ iam-inventory:
 
 iam-orphans:
 	@python3 scripts/iam_inventory.py orphans $(IAM_LAYERS)
+
+# ── Untracked-resource detection beyond IAM ───────────────────────────────────
+#
+# The teardown proved this is needed. `terraform destroy` reported complete
+# success — 82 resources, zero errors — and left behind an 8 GiB EBS volume that
+# Terraform had never heard of: the EBS CSI driver provisioned it for Langfuse's
+# Postgres PVC, so it was created through the Kubernetes API, not by Terraform.
+#
+# A resource created by a controller inside the cluster is invisible to the
+# configuration that created the cluster. That is the storage version of the
+# searxng orphan, and it survives a teardown that looks clean.
+#
+# Cluster-provisioned volumes are identifiable: the CSI driver tags them with
+# kubernetes.io/created-for/pvc/name and ebs.csi.aws.com/cluster-name.
+storage-orphans:
+	@python3 scripts/iam_inventory.py storage-orphans
 
 # ── Combined (mirrors CI exactly) ─────────────────────────────────────────────
 

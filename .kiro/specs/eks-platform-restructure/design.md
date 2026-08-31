@@ -1404,13 +1404,89 @@ The one thing that must not be improvised: **no `|| true`.** Security finding 2
 applies to the teardown as much as to the pipeline. If a destroy step fails, it
 fails visibly and is diagnosed.
 
-**Phase 2 — confirm the account is empty, then delete the state object.**
-Assert directly against AWS, not against Terraform's opinion: no EKS cluster, no
-node groups, no NAT gateway, no VPC other than the default, no `eaf/*` or `tools/*`
-ECR repositories, no workspace bucket, and only the roles listed as surviving
-below. Then delete `workloads/dev/terraform.tfstate` and any `.tflock` beside it.
-The bucket is versioned, so the deleted object remains recoverable — that is the
-backup, and no separate backup step is needed.
+**Phase 2 — confirm the account is empty. The emptied state object stays.**
+
+Assert directly against AWS, not against Terraform's opinion.
+
+*Revised: the original text said to delete `workloads/dev/terraform.tfstate`. It
+stays, for two reasons.*
+
+**It cannot be deleted by the principal that runs the teardown, by design.**
+`bootstrap/seed` grants `eaf-baseline-dev-role` `s3:GetObject`, `s3:PutObject` and
+`s3:ListBucket` on `workloads/dev/*`, and `s3:DeleteObject` **only** on
+`workloads/dev/*.tflock`. A role that can empty a state file cannot delete it.
+That is a sensible guard, and deleting the object would mean widening a bootstrap
+IAM policy — touching the one layer this effort is not permitted to change, to
+achieve nothing.
+
+**It is harmless, and it is the record.** After the destroy the object describes
+zero resources. The new layers use different keys —
+`workloads/dev/platform/`, `workloads/dev/cluster-addons/`,
+`workloads/dev/apps/` — so nothing can accidentally consume it, and with the
+directory deleted no configuration points at it. An empty state file that nothing
+references costs nothing and preserves the history of what was there.
+
+If it is ever worth removing, that is a one-off action by a management-account
+principal, not a permission the teardown role should hold.
+
+### Outcome, 2026-08-31
+
+Executed as designed. Dry run first (run `33394116510`): 112 resources tracked,
+`Plan: 0 to add, 0 to change, 96 to destroy`, no mutation — the confirmation, lock
+clearing, state surgery, plan and apply steps all correctly skipped.
+
+Then the real run (`33394897276`), 11m43s:
+
+```
+Apply complete! Resources: 0 added, 0 changed, 82 destroyed.
+```
+
+96 minus the 14 `kubernetes_*` and `helm_release.*` entries dropped from state
+first, as predicted. Zero errors.
+
+Verified directly against AWS afterwards: no EKS cluster, no non-default VPC, no
+NAT gateway, no ECR repositories, no S3 buckets, no secrets, no Cognito pools, no
+running instances, no load balancers, no Elastic IPs, no non-default security
+groups, no snapshots.
+
+Survivors, exactly as the table above requires: `eaf-workload-ci-role`,
+`eaf-workload-boundary`, and the `token.actions.githubusercontent.com` OIDC
+provider — which is correct, since `eaf-workload-ci-role` trusts it. The cluster's
+own OIDC provider went with the cluster. All seven workloads-owned roles are gone,
+including `eaf-workload-dev-deployer-role`, which is not recreated.
+
+### The one thing the teardown missed, and what it teaches
+
+`terraform destroy` reported complete success and left behind an **8 GiB EBS
+volume** that Terraform had never heard of:
+
+```
+kubernetes.io/created-for/pvc/name       data-langfuse-postgresql-0
+kubernetes.io/created-for/pvc/namespace  langfuse
+ebs.csi.aws.com/cluster-name             eaf-dev
+```
+
+The EBS CSI driver provisioned it in response to a PersistentVolumeClaim, so it
+was created through the Kubernetes API rather than by Terraform. The `gp2-csi`
+StorageClass carried `reclaim_policy = Delete`, but **a reclaim policy only fires
+when the PVC is deleted through the Kubernetes API.** The teardown dropped the
+Kubernetes resources from state and destroyed the cluster, so no PVC deletion ever
+happened, and the volume outlived everything that knew about it.
+
+This is the storage version of the `searxng` orphan: a resource created by a
+controller *inside* the cluster is invisible to the configuration that created the
+cluster. It survives a teardown that looks clean, and it goes on billing.
+
+Deleted manually as a recorded step. The durable answer is mechanical:
+`make storage-orphans` lists detached volumes carrying the CSI driver's tags and
+fails naming them. It runs alongside `make iam-orphans` after each apply.
+
+**Two consequences for later steps.** Step 5 gives Neo4j a PVC, and Step 7 gives
+Langfuse four more. Each of those PRs must state that reverting it leaves an
+orphaned volume unless the release is uninstalled through Helm first — reverting
+Terraform destroys the release from *its* perspective while the PVC deletion may
+not propagate. And any future teardown deletes namespaces through the Kubernetes
+API *before* destroying the cluster, so reclaim policies get the chance to fire.
 
 ### What must survive
 
@@ -2782,6 +2858,23 @@ principal appears in an explicit allowlist in configuration.
 
 *Prevents: the accumulation that produced three cluster-admin principals plus
 `bootstrap_cluster_creator_admin_permissions`, none of which was reviewed as a set.*
+
+### Property 17: No cluster-provisioned volume outlives its cluster
+
+*For all* EBS volumes carrying `kubernetes.io/created-for/pvc/name` or
+`ebs.csi.aws.com/cluster-name`, the volume is attached, or its cluster still
+exists.
+
+**How it is checked.** `make storage-orphans` — list volumes, keep those with the
+CSI driver's tags, report any that are detached, fail naming them.
+
+*Prevents: the failure the 2026-08-31 teardown actually produced. `terraform
+destroy` reported 82 resources destroyed and zero errors while leaving an 8 GiB
+Langfuse Postgres volume behind, because the PVC was never deleted through the
+Kubernetes API and a reclaim policy only fires on API deletion. Terraform cannot
+detect this — the volume was never in its state — so no plan, no refresh and no
+`No changes` assertion would ever have caught it. It needs a check that queries
+AWS directly.*
 
 ### Property 15: Every IAM role in the account is owned by tracked configuration
 

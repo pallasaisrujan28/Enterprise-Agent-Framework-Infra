@@ -17,9 +17,22 @@ incident survives until the next pipeline run, and then the build says its name.
 Reads state via `terraform show -json`, so it does not depend on a layer exposing
 an outputs contract and works even for layers written before that convention.
 
+    storage-orphans
+               Find EBS volumes that no Terraform layer could know about, because
+               a controller inside the cluster created them.
+
+               The teardown on 2026-08-31 proved this is needed. `terraform
+               destroy` reported 82 resources destroyed and zero errors, and left
+               an 8 GiB volume behind: the EBS CSI driver had provisioned it for
+               Langfuse's Postgres PVC through the Kubernetes API, so Terraform
+               never knew it existed. The StorageClass reclaim policy was Delete,
+               but that only fires when the PVC is deleted through the API — and
+               the cluster was destroyed with the PVC still in place.
+
 Usage:
-    iam_inventory.py inventory DIR [DIR ...]
-    iam_inventory.py orphans   DIR [DIR ...]
+    iam_inventory.py inventory       DIR [DIR ...]
+    iam_inventory.py orphans         DIR [DIR ...]
+    iam_inventory.py storage-orphans
 
 Exit codes:
     0  clean
@@ -231,12 +244,84 @@ def cmd_orphans(dirs: list[Path]) -> int:
     return 1
 
 
+def cmd_storage_orphans() -> int:
+    """Report EBS volumes created by an in-cluster controller.
+
+    These are never in Terraform state, so the `orphans` command cannot find them
+    — it compares against state and would have to call every one of them an
+    orphan. They are identified instead by the tags the EBS CSI driver applies.
+    """
+    try:
+        raw = run(
+            [
+                "aws", "ec2", "describe-volumes",
+                "--query", "Volumes[].{id:VolumeId,state:State,size:Size,"
+                           "attachments:Attachments,tags:Tags}",
+                "--output", "json",
+            ]
+        )
+    except RuntimeError as exc:
+        print(f"ERROR: could not list volumes: {exc}", file=sys.stderr)
+        return 1
+
+    volumes = json.loads(raw or "[]")
+
+    def tag(vol: dict, key: str) -> str:
+        for t in vol.get("tags") or []:
+            if t.get("Key") == key:
+                return t.get("Value", "")
+        return ""
+
+    cluster_provisioned = [
+        v for v in volumes
+        if tag(v, "kubernetes.io/created-for/pvc/name")
+        or tag(v, "ebs.csi.aws.com/cluster-name")
+    ]
+    detached = [
+        v for v in cluster_provisioned
+        if not (v.get("attachments") or [])
+    ]
+
+    print(f"EBS volumes total          : {len(volumes)}")
+    print(f"cluster-provisioned (PVC)  : {len(cluster_provisioned)}")
+    print(f"of those, detached         : {len(detached)}")
+
+    if not detached:
+        print("\nClean: no detached cluster-provisioned volumes.")
+        return 0
+
+    print("\nORPHANED PVC VOLUMES — detached, and invisible to Terraform:\n")
+    for v in detached:
+        pvc = tag(v, "kubernetes.io/created-for/pvc/name") or "?"
+        ns = tag(v, "kubernetes.io/created-for/pvc/namespace") or "?"
+        cl = tag(v, "ebs.csi.aws.com/cluster-name") or "?"
+        print(f"  - {v['id']}  {v['size']}GiB  {v['state']}")
+        print(f"      pvc={ns}/{pvc}  cluster={cl}")
+    print(
+        "\nA detached PVC volume means a PersistentVolumeClaim was not deleted "
+        "through the Kubernetes API before its cluster went away. The "
+        "StorageClass reclaim policy only fires on API deletion, so the volume "
+        "outlives everything that knew about it.\n"
+        "Delete with: aws ec2 delete-volume --volume-id <id>"
+    )
+    return 1
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) < 3 or argv[1] not in {"inventory", "orphans"}:
+    if len(argv) < 2:
         print(__doc__, file=sys.stderr)
         return 2
 
-    command, dirs = argv[1], [Path(a) for a in argv[2:]]
+    command = argv[1]
+
+    if command == "storage-orphans":
+        return cmd_storage_orphans()
+
+    if command not in {"inventory", "orphans"} or len(argv) < 3:
+        print(__doc__, file=sys.stderr)
+        return 2
+
+    dirs = [Path(a) for a in argv[2:]]
     return cmd_inventory(dirs) if command == "inventory" else cmd_orphans(dirs)
 
 
