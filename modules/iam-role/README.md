@@ -69,7 +69,71 @@ module "deployer_role" {
 }
 ```
 
+### Pod Identity — the default for workloads in the cluster
+
+```hcl
+module "agent_role" {
+  source = "../../modules/iam-role"
+
+  org_prefix  = var.org_prefix
+  environment = "dev"
+  layer       = "platform"
+  purpose     = "agent"
+  description = "Assumed by the agent pod via EKS Pod Identity to call Bedrock and read its workspace bucket."
+  owner       = "platform-team"
+
+  boundary_arn = data.aws_iam_policy.workload_boundary.arn
+
+  trust = {
+    type = "eks_pod_identity"
+    eks_pod_identity = {
+      namespace       = "eaf"
+      service_account = "eaf-agent"
+
+      # Optional. Omit to allow any cluster in this account, which is what makes
+      # the role reusable. Set it where a role must not be usable from elsewhere.
+      # cluster_names = ["eaf-dev"]
+    }
+  }
+
+  inline_policies = {
+    bedrock-invoke = data.aws_iam_policy_document.agent_bedrock.json
+  }
+}
+```
+
+The role alone does nothing. It has to be paired with an
+`aws_eks_pod_identity_association` naming the same namespace and service account —
+that association, not the trust policy, is what binds the role to a cluster.
+
+**The namespace and service-account conditions are emitted whether you ask or not.**
+AWS's documented example trust policy has no conditions at all, which means *any pod,
+in any namespace, in any cluster in this account* may assume the role. That is
+strictly broader than the IRSA policy it replaces, and the only thing standing in the
+way is `iam:PassRole` on whoever creates the association — a permission on a different
+principal, not a property of this role. So the module does not offer that as a choice.
+
+Two details that are easy to get wrong and fail silently:
+
+- The conditions use **`aws:RequestTag`**, not `aws:PrincipalTag`. Both key families
+  accept the same six tag names. In a *trust* policy the tags are on the AssumeRole
+  request, so it is `aws:RequestTag`; `aws:PrincipalTag` is for reading them back in
+  an identity or resource policy once the session exists. The wrong one produces valid
+  JSON that applies cleanly and never matches.
+- Both **`sts:AssumeRole` and `sts:TagSession`** are required. EKS always sends session
+  tags, so a policy granting only `sts:AssumeRole` fails the assumption.
+
+Cross-account access is supported and does not need IRSA: set `target_role_arn` on the
+association and EKS performs the two assumptions itself. The target role's own trust
+policy is not this shape — it trusts the first role, with a condition on the
+association's computed `external_id`. That trust type is not built here yet; there is
+no consumer for it.
+
 ### IRSA
+
+Retained because Pod Identity is unavailable on Fargate, on Windows nodes, and outside
+EKS proper. Prefer `eks_pod_identity` otherwise — see
+`learnings/005-irsa-and-pod-identity.md`.
 
 ```hcl
 module "agent_role" {
@@ -100,7 +164,11 @@ module "agent_role" {
 }
 ```
 
-## The two mistakes this module makes unreachable
+## The mistakes this module makes unreachable
+
+Each of these is a real failure this project has hit, or one the documentation warns
+about. All of them share a shape: valid JSON that applies cleanly and then never
+matches, with nothing pointing at why.
 
 ### 1. The GitHub `sub` claim is mutually exclusive by job context
 
@@ -153,6 +221,13 @@ Two reasons it is not a literal or an input:
 
 Pass the provider resource's `.arn` attribute. Passing an issuer URL such as
 `https://token.actions.githubusercontent.com` is rejected at plan time.
+
+### 4. A Pod Identity trust policy with no conditions
+
+AWS's documented example omits conditions, which permits any pod in any namespace in
+any cluster in the account. The module always emits the namespace and service-account
+conditions, always uses `aws:RequestTag` rather than `aws:PrincipalTag`, and always
+grants both `sts:AssumeRole` and `sts:TagSession`. See *Pod Identity* above.
 
 ## Permissions boundaries
 
@@ -217,13 +292,17 @@ aggregates into an `iam_roles` output. `inventory.trusted_subjects` flattens exa
 who may assume the role, so an over-broad trust policy is visible without reading
 JSON.
 
+For `eks_pod_identity` that entry spells the cluster scope out in words — either the
+named clusters or `ANY in this account` — because the permissive case is the default
+and is the one thing a reviewer should not have to infer.
+
 ## Tests
 
 ```sh
 terraform -chdir=modules/iam-role test
 ```
 
-18 tests, `command = plan` throughout, a few seconds. Half assert that bad input is
+26 tests, `command = plan` throughout, a few seconds. Half assert that bad input is
 **rejected** — a guardrail nobody has watched fail is not known to work.
 
 **No credentials of any kind.** Verified by running the suite with
