@@ -58,6 +58,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # DORMANT until the layers return.
+      #
+      # This workflow did its job: run 33394897276 destroyed 82 resources cleanly.
+      # workloads/eaf/dev has since been deleted from the repository, so there is
+      # no directory for it to operate on. It is kept rather than deleted because
+      # the shape is worth preserving — dry run by default, saved plan applied
+      # rather than recomputed, typed confirmation, no suppressed exit codes — and
+      # it gets rewritten per layer at design Step 3.
+      #
+      # This guard turns "confusing failure in a later step" into one clear message.
+      - name: check target exists
+        run: |
+          DIR="workloads/eaf/${{ inputs.target }}"
+          if [[ ! -d "$DIR" ]]; then
+            {
+              echo "## Nothing to destroy"
+              echo
+              echo "\`$DIR\` does not exist in this repository."
+              echo
+              echo "The monolithic dev layer was destroyed on 2026-08-31 (82 resources,"
+              echo "run 33394897276) and removed from the repository. It is being replaced"
+              echo "by three layers — platform, cluster-addons, apps — each of which will"
+              echo "get its own destroy path."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$DIR does not exist — nothing to destroy" >&2
+            exit 1
+          fi
+
       - name: check confirmation
         if: ${{ !inputs.plan_only }}
         run: |

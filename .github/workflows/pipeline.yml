@@ -22,32 +22,26 @@ env:
   DEV_ACCOUNT_ID: "718438899462"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JOB GRAPH
+# JOB GRAPH — reduced, because the layer this pipeline deployed no longer exists.
 #
-#   checks ─┬─→ plan ──→ deploy      (deploy: main + manual dispatch only)
-#           └─→ build-images         (independent of deploy — see RC1)
+#   checks ──→ build-images     (build-images: main + manual dispatch only)
 #
 # WHEN EACH RUNS
 #
-#   any branch, push:   checks ✓   plan ✓   build-images —   deploy —
-#   main, push:         checks ✓   plan ✓   build-images —   deploy —
-#   main, dispatch:     checks ✓   plan ✓   build-images ✓   deploy ✓
+#   any branch, push:   checks ✓   build-images —
+#   main, push:         checks ✓   build-images —
+#   main, dispatch:     checks ✓   build-images ✓
 #
-# So a merge to main runs static checks and a plan, and changes nothing. Both
-# jobs that act on the world require a deliberate dispatch, which is how every
-# other workflow in this repository already behaves.
+# So a merge to main runs static checks and changes nothing at all.
 #
-# Two deliberate properties, both explained at the jobs themselves:
+# The plan and deploy jobs were removed with workloads/eaf/dev, which was
+# destroyed (82 resources, run 33394897276) and deleted from this repository.
+# They are replaced at design Steps 3 and 4 by one plan and one apply job per
+# layer — platform, cluster-addons, apps — each applying a saved plan artefact.
 #
-#   build-images does not wait for deploy. Images must exist before anything
-#   references them; the reverse ordering is what put every tool image into
-#   ImagePullBackOff.
-#
-#   deploy does not run on a merge. It applies workloads/eaf/dev, which is
-#   being torn down and rebuilt as three layers, and each run performs seven
-#   unreviewed state mutations before failing. Applying is a deliberate act
-#   until that layer is replaced, at which point this reverts to running on
-#   merge with per-layer plans.
+# build-images remains dispatch-only until Firecrawl is rebuilt at Step 6. It also
+# has nowhere to push right now: the ECR repositories it targeted were created by
+# the destroyed layer and will be recreated by L1.
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -88,169 +82,28 @@ jobs:
           pip install --quiet pyyaml
           python3 scripts/validate_register.py accounts/register.yaml
 
-  # ── 2. plan ────────────────────────────────────────────────────────────────
-  plan:
-    name: plan
-    needs: checks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # REMOVED: the terraform plan of workloads/eaf/dev.
-      #
-      # It never checked anything. Follow the chain as it was:
-      #
-      #   - the job authenticated as eaf-bootstrap-plan-role, which lives in the
-      #     MANAGEMENT account 193027353132
-      #   - it planned workloads/eaf/dev, whose resources are all in EAF-DEV
-      #     718438899462
-      #   - provider.tf had no assume_role, so Terraform operated in the
-      #     management account
-      #   - -refresh=false meant it never read those resources
-      #
-      # So it compared configuration against the state file and never contacted
-      # the account the resources live in. It passed because it was not looking.
-      # The old comment attributed -refresh=false to the plan role being
-      # "read-only on state"; the real reason a refresh fails is that the provider
-      # was pointed at the wrong account.
-      #
-      # This cannot simply be fixed here. Restoring assume_role to provider.tf —
-      # which this change does, because the destroy needs it — makes this job fail
-      # outright: eaf-bootstrap-plan-role carries the AWS-managed ReadOnlyAccess,
-      # and that policy grants only sts:GetAccessKeyInfo, sts:GetCallerIdentity
-      # and sts:GetSessionToken. It has no sts:AssumeRole, so it cannot make the
-      # hop into EAF-DEV. That is why cff1ec9 removed the block in the first
-      # place — a real constraint, navigated in the wrong direction.
-      #
-      # A plan is worth having when it can read the resources it describes with
-      # refresh enabled. That needs a per-layer plan role with in-account read
-      # access, which arrives with L1/L2/L3. Planning a layer that is about to be
-      # deleted, from the wrong account, with refresh off, is not worth repairing.
-      #
-      # The job is kept as a placeholder so the graph and the per-layer plan jobs
-      # that replace it are a visible diff rather than a reappearance.
-      - name: no layer to plan
-        run: |
-          echo "workloads/eaf/dev is pending teardown; per-layer plans arrive with L1." \
-            >> "$GITHUB_STEP_SUMMARY"
-
-  # ── 3. deploy — manual dispatch only, temporarily ──────────────────────────
+  # ── plan and deploy: REMOVED with the layer they operated on ───────────────
   #
-  # TEMPORARY, and it comes off when workloads/eaf/dev is rebuilt as three
-  # layers. Do not restore auto-apply before then.
+  # Both jobs targeted workloads/eaf/dev, which has been destroyed (82 resources,
+  # run 33394897276) and deleted from this repository. A job whose
+  # working-directory does not exist is dead code, so they are gone rather than
+  # left to fail.
   #
-  # Why: this job applies workloads/eaf/dev, the layer being torn down. Before
-  # it reaches terraform apply it performs seven out-of-band mutations — a
-  # Secrets Manager force-delete, deletion of the state lock object, and a
-  # series of `terraform state rm` and `import` calls — every one of them
-  # wrapped in `|| true` so none can fail visibly. It then times out on the
-  # aws-ebs-csi-driver addon. Four consecutive runs on main have failed this
-  # way, the most recent at 13m40s.
+  # What replaces them, at design Step 3 and 4: one plan job and one apply job per
+  # layer — platform, cluster-addons, apps — each planning to a saved artefact and
+  # applying that artefact. Not a single monolithic deploy.
   #
-  # Firing that on every merge means an unrelated change — a doc edit, a new
-  # module — mutates live AWS state and burns twenty minutes. This condition
-  # makes applying a deliberate act instead of a side effect of merging.
+  # Two properties the removed jobs lacked, and the replacements must have:
   #
-  # Note this is a manual TRIGGER, not an approval gate: the dev environment
-  # has no protection rules, so nothing pauses waiting for a reviewer.
+  #   Refresh enabled. The old plan ran -refresh=false and authenticated as a
+  #   management-account role against resources in EAF-DEV, so it never read them
+  #   and passed by not looking (RC7). Each new layer gets a plan role with
+  #   in-account read access.
   #
-  # It also brings workloads into line with every other workflow in this
-  # repository — apply-foundation, create-accounts, apply-security-baseline and
-  # destroy-workloads are all workflow_dispatch only. pipeline.yml was the sole
-  # exception, and the sole layer that has never applied successfully.
-  deploy:
-    name: deploy dev
-    needs: plan
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    # No environment: — with environment: dev the OIDC sub becomes
-    # environment:dev which the deployer role trust policy does not accept.
-    # Without it the sub is ref:refs/heads/main which matches ref:refs/heads/*.
-    concurrency:
-      group: deploy-dev
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_WORKLOAD_DEV_DEPLOYER_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-          role-session-name: eaf-deploy-${{ github.run_id }}
-
-      - name: force-delete pending secrets
-        run: |
-          # Secrets in pending-deletion state block re-creation with the same name.
-          # Force-delete them so Terraform can recreate cleanly.
-          # || true because it is fine if the secret does not exist
-          aws secretsmanager delete-secret \
-            --secret-id eaf-dev/gateway/agent-client-creds \
-            --force-delete-without-recovery \
-            --region ${{ vars.AWS_REGION }} || true
-
-      - name: clear stuck state lock
-        working-directory: workloads/eaf/dev
-        run: |
-          BUCKET=$(grep 'bucket' backend.hcl | awk -F'"' '{print $2}')
-          KEY=$(grep '^key' backend.hcl | awk -F'"' '{print $2}')
-          aws s3 rm "s3://${BUCKET}/${KEY}.tflock" --region eu-west-2 || true
-
-      - name: init
-        working-directory: workloads/eaf/dev
-        run: terraform init -input=false -no-color -backend-config=backend.hcl
-
-      - name: one-time state fix — remove null-identity deployments
-        working-directory: workloads/eaf/dev
-        run: |
-          # One-time state migration — deployer role has state write access.
-          # Remove this block after first successful apply.
-          # searxng removed from config — state rm only
-          terraform state rm kubernetes_deployment.searxng 2>/dev/null || true
-          # firecrawl_* still in config — state rm + import to fix null identity
-          for r in \
-            "kubernetes_deployment.firecrawl_redis:tools/firecrawl-redis" \
-            "kubernetes_deployment.firecrawl_playwright:tools/firecrawl-playwright" \
-            "kubernetes_deployment.firecrawl_api:tools/firecrawl-api" \
-            "kubernetes_deployment.firecrawl_worker:tools/firecrawl-worker"; do
-            resource="${r%%:*}"
-            id="${r##*:}"
-            terraform state rm "$resource" 2>/dev/null || true
-            terraform import -input=false "$resource" "$id" 2>/dev/null || true
-          done
-
-      - name: phase 1 — EKS access policy
-        working-directory: workloads/eaf/dev
-        run: |
-          # Grant OrganizationAccountAccessRole EKS cluster-admin first so
-          # the Kubernetes/Helm providers can authenticate in phase 2.
-          terraform apply -no-color -input=false -lock-timeout=10m \
-            -target=aws_eks_access_policy_association.org_role_admin \
-            -target=aws_eks_access_policy_association.workload_deployer_admin \
-            -auto-approve || true
-
-      - name: phase 2 — full apply
-        working-directory: workloads/eaf/dev
-        run: |
-          set -euo pipefail
-          # Fresh plan after phase 1 — phase 1 changes state so saved plans go stale.
-          terraform plan  -no-color -input=false -lock-timeout=10m -out=tfplan-apply
-          terraform apply -no-color -input=false -lock-timeout=30m tfplan-apply
-
-      - name: outputs
-        if: always()
-        working-directory: workloads/eaf/dev
-        run: |
-          {
-            echo "## deployed"
-            echo '```'
-            terraform output -no-color 2>/dev/null || echo "no outputs yet"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+  #   No out-of-band mutation. The old deploy performed seven state and AWS
+  #   mutations before applying, every one wrapped in `|| true`. The replacements
+  #   contain no `state rm`, no `import`, no `aws` CLI writes, and no suppressed
+  #   exit codes.
 
   # ── 4. build-images — no longer waits for deploy ───────────────────────────
   #
