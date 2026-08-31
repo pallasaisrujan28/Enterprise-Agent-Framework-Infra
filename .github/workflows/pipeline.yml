@@ -22,13 +22,28 @@ env:
   DEV_ACCOUNT_ID: "718438899462"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# All 4 jobs always run on every push.
-# Deploy and build-images are skipped automatically on feature branches.
+# JOB GRAPH
 #
-#   checks → plan → deploy → build-images
+#   checks ─┬─→ plan ──→ deploy      (deploy: main + manual dispatch only)
+#           └─→ build-images         (independent of deploy — see RC1)
 #
-#   feature branch:  checks ✓  plan ✓  deploy —  build-images —
-#   main:            checks ✓  plan ✓  deploy ✓  build-images ✓
+# WHEN EACH RUNS
+#
+#   any branch, push:   checks ✓   plan ✓   build-images —   deploy —
+#   main, push:         checks ✓   plan ✓   build-images ✓   deploy —
+#   main, dispatch:     checks ✓   plan ✓   build-images ✓   deploy ✓
+#
+# Two deliberate properties, both explained at the jobs themselves:
+#
+#   build-images does not wait for deploy. Images must exist before anything
+#   references them; the reverse ordering is what put every tool image into
+#   ImagePullBackOff.
+#
+#   deploy does not run on a merge. It applies workloads/eaf/dev, which is
+#   being torn down and rebuilt as three layers, and each run performs seven
+#   unreviewed state mutations before failing. Applying is a deliberate act
+#   until that layer is replaced, at which point this reverts to running on
+#   merge with per-layer plans.
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -110,11 +125,34 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── 3. deploy — skipped on feature branches ────────────────────────────────
+  # ── 3. deploy — manual dispatch only, temporarily ──────────────────────────
+  #
+  # TEMPORARY, and it comes off when workloads/eaf/dev is rebuilt as three
+  # layers. Do not restore auto-apply before then.
+  #
+  # Why: this job applies workloads/eaf/dev, the layer being torn down. Before
+  # it reaches terraform apply it performs seven out-of-band mutations — a
+  # Secrets Manager force-delete, deletion of the state lock object, and a
+  # series of `terraform state rm` and `import` calls — every one of them
+  # wrapped in `|| true` so none can fail visibly. It then times out on the
+  # aws-ebs-csi-driver addon. Four consecutive runs on main have failed this
+  # way, the most recent at 13m40s.
+  #
+  # Firing that on every merge means an unrelated change — a doc edit, a new
+  # module — mutates live AWS state and burns twenty minutes. This condition
+  # makes applying a deliberate act instead of a side effect of merging.
+  #
+  # Note this is a manual TRIGGER, not an approval gate: the dev environment
+  # has no protection rules, so nothing pauses waiting for a reviewer.
+  #
+  # It also brings workloads into line with every other workflow in this
+  # repository — apply-foundation, create-accounts, apply-security-baseline and
+  # destroy-workloads are all workflow_dispatch only. pipeline.yml was the sole
+  # exception, and the sole layer that has never applied successfully.
   deploy:
     name: deploy dev
     needs: plan
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # No environment: — with environment: dev the OIDC sub becomes
     # environment:dev which the deployer role trust policy does not accept.
@@ -205,10 +243,29 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── 4. build-images — skipped on feature branches ──────────────────────────
+  # ── 4. build-images — no longer waits for deploy ───────────────────────────
+  #
+  # `needs: checks`, not `needs: deploy`. This is RC1 in the design document,
+  # and it is the reason every tool image reference in the cluster sat in
+  # ImagePullBackOff.
+  #
+  # The old ordering was checks -> plan -> deploy -> build-images. But deploy
+  # creates Kubernetes Deployments whose containers reference
+  # tools/firecrawl and tools/firecrawl-playwright, and those repositories were
+  # empty. So deploy could not converge because the images did not exist, and
+  # the images were never built because build-images was queued behind deploy.
+  # A deadlock that no number of retries resolves, because the order is simply
+  # wrong: the pipeline was told to install the application before it was told
+  # to build it.
+  #
+  # Building images depends on nothing but the source, so it depends on nothing
+  # but checks. Images now exist before anything can reference them.
+  #
+  # This job touches no Terraform state — it builds a container and pushes to
+  # ECR — so decoupling it from deploy carries no state risk.
   build-images:
     name: build ${{ matrix.image.name }}
-    needs: deploy
+    needs: checks
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     strategy:
