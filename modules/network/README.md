@@ -143,10 +143,14 @@ storage have to agree on one — and a list index is a poor way to express that.
 **`nat_public_ips`** is the source address every outbound connection from a node
 appears to come from, which is what a third party puts in an allowlist.
 
-**`private_route_table_ids`** exists for Step 10. Closing the public cluster
-endpoint requires VPC interface endpoints — including
-`com.amazonaws.<region>.oidc-eks`, without which IRSA token validation fails from
-inside the VPC with `NXDOMAIN` — and those attach to route tables.
+**`private_route_table_ids`** exists for Step 10. Closing the public cluster endpoint
+requires VPC interface endpoints — `ec2`, `ecr.api`, `ecr.dkr`, `sts`, `logs` and an S3
+gateway endpoint among them — and those attach to route tables.
+
+Note the platform uses **Pod Identity**, not IRSA, so
+`com.amazonaws.<region>.oidc-eks` is *not* among them. Under IRSA it would be
+mandatory: without it, resolving the cluster's OIDC issuer from inside a VPC that has no
+outbound internet fails with `NXDOMAIN`. Pod Identity has no OIDC issuer to resolve.
 
 ## NAT topology
 

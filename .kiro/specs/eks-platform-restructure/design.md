@@ -533,7 +533,7 @@ graph TD
         A1[VPC, subnets, NAT]
         A2["EKS cluster + node groups + core addons"]
         A3["ECR, S3 workspaces"]
-        A4["IAM: agent IRSA, CI role, deployer role"]
+        A4["IAM: agent role + Pod Identity assoc, CI role, deployer role"]
         A5["EKS access entries + policy associations"]
         A6["Cognito, Secrets Manager, SSM"]
     end
@@ -636,7 +636,7 @@ The reasoning, in order:
    between layers, so L2's plan does not break when L1's outputs are refactored.
 
 `terraform_remote_state` is still the right tool for non-provider values that L2
-and L3 need from L1 — the ECR registry URL, the agent IRSA role ARN, the S3
+and L3 need from L1 — the ECR registry URL, the agent role ARN, the S3
 workspace bucket name. `TERRAFORM-NOTES.md` §6 already makes this argument
 (*"Prefer this over hardcoding an ARN"*), and nothing here contradicts it. The
 narrower claim is only: **provider configuration is different, and gets data
@@ -653,7 +653,7 @@ layer whose providers are `aws`, `tls` and `random` — no `kubernetes`, no `hel
 
 **Owns:** VPC, subnets, NAT, route tables, security groups; the EKS cluster, node
 groups and core addons; ECR repositories; S3 workspace buckets; IAM roles
-including the agent IRSA role, the CI role and the deployer role; EKS access
+including the agent role, the CI role and the deployer role; EKS access
 entries and policy associations; SSM parameters.
 
 **Interface (outputs):**
@@ -741,7 +741,7 @@ composed, and it reintroduces RC2 one level down.
 | `modules/network` | L1 | VPC, public and private subnets, IGW, NAT, route tables. Subnet count driven by an AZ-count input, not hardcoded |
 | `modules/eks-cluster` | L1 | Cluster, OIDC provider, security groups, access entries, addons with correct ordering |
 | `modules/eks-node-group` | L1 | One managed node group. Called once per pool; taints and labels are inputs, and it **outputs them** so L3 can derive tolerations rather than restating them |
-| `modules/iam-role` | L1, `accounts/*` | **The only** way any role is created. Generated name, mandatory tags, required boundary, typed trust (`github_oidc` / `eks_irsa` / `aws_service` / `account_principal`), scoped `PassRole`. See IAM Role Design |
+| `modules/iam-role` | L1, `accounts/*` | **The only** way any role is created. Generated name, mandatory tags, required boundary, typed trust (`github_oidc` / `eks_pod_identity` / `eks_irsa` / `aws_service` / `account_principal`), scoped `PassRole`. See IAM Role Design |
 | `modules/ecr-repository` | L1 | One repository with lifecycle policy, scan-on-push, KMS, immutable tags |
 | `modules/k8s-namespace` | L2 | A namespace plus its baseline: default-deny NetworkPolicy, resource quota if given, labels |
 | `modules/helm-release` | L2, L3 | A thin, opinionated wrapper: `wait` on by default, bounded timeout, `atomic` on, values passed as a typed object |
@@ -1053,8 +1053,8 @@ who it is without holding a password. There are two mechanisms for that:
 
 | | How it works | Where it is configured |
 |---|---|---|
-| **IRSA** — what this repo uses today | The cluster issues the pod a short-lived signed token; an IAM role's trust policy is written to accept tokens from that specific cluster and that specific service account | IAM trust policies, plus an OIDC provider per cluster |
-| **Pod Identity** — AWS's newer mechanism | The association between a service account and an IAM role is recorded in EKS itself; a built-in agent on the node vends credentials | The EKS API |
+| **IRSA** — what the destroyed layer used | The cluster issues the pod a short-lived signed token; an IAM role's trust policy is written to accept tokens from that specific cluster and that specific service account | IAM trust policies, plus an OIDC provider per cluster |
+| **Pod Identity** — AWS's newer mechanism, **and what the rebuild uses** | The association between a service account and an IAM role is recorded in EKS itself; a built-in agent on the node vends credentials | The EKS API |
 
 Both give short-lived credentials, so both satisfy `CLAUDE.md` principle 7. Neither
 is a security downgrade. They are just configured in different places.
@@ -1093,9 +1093,75 @@ workloads; IRSA remains fully supported
 *Content was rephrased for compliance with licensing restrictions.* There is no
 deadline forcing this and no reason to churn a working mechanism mid-crisis.
 
-**Decision:** keep managed node groups and IRSA for this effort. Evaluate Auto
-Mode as its own spec, with its own decision record, once the agent is running and
-there is a stable baseline to compare against. Listed under Non-Goals.
+**Decision:** keep managed node groups. Evaluate Auto Mode as its own spec, with its
+own decision record, once the agent is running and there is a stable baseline to
+compare against. Listed under Non-Goals.
+
+### Revision: the identity half of this decision is reversed — Pod Identity
+
+*Revised 2026-08-31, after the teardown and before `modules/eks-cluster` was written.*
+
+The decision above kept IRSA. **Every premise it rested on has since become false**,
+and all three failed for the same reason: the workloads layer no longer exists.
+
+| Premise, as written | Status now |
+|---|---|
+| "IRSA — what this repo uses today" | Nothing runs today. The layer was destroyed: 82 resources, account verified empty |
+| "The agent's IRSA role in `iam.tf`, the OIDC provider in `eks.tf` and the `ebs-csi` IRSA role would all have to migrate" | There is nothing to migrate. Those files were deleted |
+| "no reason to churn a working mechanism mid-crisis" | There is no working mechanism to churn |
+
+The original argument was **not** that IRSA is better. It was that changing the identity
+mechanism *at the same time as* rebuilding the module boundaries gives two candidate
+causes for any failure and no way to bisect. That was correct while a cluster existed.
+On an empty account there is no second change — there is only one build, and it can use
+either mechanism at identical cost.
+
+So the question reduces to which is right for a greenfield cluster, and AWS answers it
+directly. Read from the source of the EKS Best Practices Guide
+([`aws/aws-eks-best-practices`](https://github.com/aws/aws-eks-best-practices), branch
+`mainline`, 2026-08-31), because the rendered documentation pages returned no
+extractable content:
+
+> Unless you have specific usecases for IRSA, we recommend you use EKS Pod Identities
+> when using EKS.
+
+— `latest/bpg/security/iam.adoc`
+
+> EKS Pod Identities are the recommended approach for new workloads on supported node
+> types, while IRSA remains a fully supported alternative.
+
+— `latest/bpg/security/multiaccount.adoc`
+
+**Every IRSA-only condition AWS lists fails to apply here.** Pod Identity is unavailable
+on Fargate, Windows nodes, Outposts, EKS Anywhere and self-managed Kubernetes; this
+cluster runs Linux EC2 managed node groups. It caps at 5,000 associations per cluster,
+against a workload needing single digits. And its cross-account path is two hops rather
+than one — but `CreatePodIdentityAssociation` takes a `targetRoleArn` and **EKS performs
+the chaining itself**, exporting a computed `external_id` for the target role's trust
+policy. `aws_eks_pod_identity_association` supports both today.
+
+What this buys, concretely:
+
+- **No OIDC provider per cluster**, so no `iam:CreateOpenIDConnectProvider` in the
+  deployer's permission set and no per-cluster IAM object to leave behind
+- **`RC7`'s VPC-endpoint trap disappears.** Finding 5 below documents that closing the
+  public endpoint requires `com.amazonaws.<region>.oidc-eks`, absent which IRSA token
+  validation fails from inside the VPC with `NXDOMAIN`. Pod Identity does not validate
+  tokens against an OIDC issuer, so Step 10 loses that dependency entirely
+- **No STS quota consumption**, and no throttling from SDKs re-assuming roles
+- **Session tags** for cluster name, namespace and service account, enabling one role
+  shared across service accounts under ABAC rather than a role per workload — which is
+  the failure mode this whole effort exists to stop
+
+Two costs, both accepted: the `eks-pod-identity-agent` add-on must be installed **before
+the node group**, alongside `vpc-cni` and `kube-proxy`; and associations are eventually
+consistent, so they are created in Terraform rather than in any request path.
+
+**`modules/iam-role` keeps its `eks_irsa` trust type.** It is tested and costs nothing to
+retain, and it is the correct answer should a Fargate profile or a Windows node group
+ever appear. A new `eks_pod_identity` trust type is added alongside it.
+
+*Concepts and the full comparison: `learnings/005-irsa-and-pod-identity.md`.*
 
 ---
 
@@ -1124,13 +1190,13 @@ Graphiti-backed memory are wanted in the cluster, each in its own namespace.
 
 So the acceptance test becomes the tool stack itself, which is a better test
 anyway: it exercises storage provisioning, scheduling, cluster DNS, secrets and
-IRSA, whereas a single stateless Deployment exercises almost none of that.
+workload identity, whereas a single stateless Deployment exercises almost none of that.
 
 ### Namespaces
 
 | Namespace | Contents | Why separate |
 |---|---|---|
-| `eaf` | Agent ServiceAccount (IRSA) now; Deployment and Service when the application can start | Matches what `k8s/deployment.yaml` already declares, so the IRSA trust condition `system:serviceaccount:eaf:eaf-agent` in `iam.tf` stays satisfiable |
+| `eaf` | Agent ServiceAccount plus its Pod Identity association now; Deployment and Service when the application can start | Matches what `k8s/deployment.yaml` already declares. The association names `eaf`/`eaf-agent`, so the ServiceAccount must exist in this namespace |
 | `monitoring` | Langfuse web and worker, plus its `postgres`, `valkey`, `clickhouse` and `seaweedfs` sub-charts | Observability has a different lifecycle and a different blast radius from the product |
 | `memory` | Neo4j now; Graphiti second | Currently Neo4j sits in `tools`, which is why memory and tool workloads compete for one node |
 | `tools` | Firecrawl: api, worker, playwright, redis, postgres, rabbitmq | Tool backends are replaceable; the product should not share a failure domain with them |
@@ -1152,7 +1218,7 @@ name behind is a silent failure, so both move with the namespace.
 |---|---|---|
 | Local development loop | 1 | No credentials. Built first because it makes everything after it cheap |
 | Teardown of `workloads/eaf/dev` | 2 | Destroy resources, then delete the emptied state object |
-| L1 `platform` | 3 | VPC, EKS 1.36, node group, addons, ECR, S3, IRSA roles |
+| L1 `platform` | 3 | VPC, EKS 1.36, node group, addons, ECR, S3, roles + Pod Identity associations |
 | L2 `cluster-addons` | 4 | The four namespaces, `gp3` StorageClass, cert-manager, ClickHouse operator |
 | `memory`: Neo4j | 5 | Auth enabled, credential in a Secret, NetworkPolicy, sized PVC |
 | `tools`: Firecrawl | 6 | Five services. API auth and NetworkPolicy, never publicly exposed |
@@ -1635,11 +1701,11 @@ IRSA works by the pod presenting a projected service-account token to
 `sts:AssumeRoleWithWebIdentity`. The role's trust policy conditions on two claims
 from the cluster's OIDC provider — `<issuer>:sub` equal to
 `system:serviceaccount:NAMESPACE:NAME`, and `<issuer>:aud` equal to
-`sts.amazonaws.com`. The existing `iam.tf` does this correctly for
-`system:serviceaccount:eaf:eaf-agent`, and it is one of the few things in the layer
-that is right.
+`sts.amazonaws.com`. The deleted `iam.tf` did this correctly for
+`system:serviceaccount:eaf:eaf-agent` — one of the few things in that layer that was
+right, and the reason `modules/iam-role` keeps an `eks_irsa` trust type.
 
-The trap, which lands in Step 10 rather than now: AWS documents that if the cluster
+The trap, which would have landed in Step 10: AWS documents that if the cluster
 VPC has no outbound internet access and private access to the cluster OIDC endpoint
 has not been configured, operations that resolve the OIDC issuer hostname from inside
 the VPC fail with `NXDOMAIN`. The remedy is a VPC interface endpoint for
@@ -1648,8 +1714,16 @@ the VPC fail with `NXDOMAIN`. The remedy is a VPC interface endpoint for
 [IAM roles for service
 accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts-technical-overview.html).*
 
-Step 10 closes the public endpoint, so that interface endpoint is a prerequisite of
-Step 10 and is added there, not discovered afterwards.
+> **This trap no longer applies to the rebuild.** The revision under *Right-Sizing
+> Analysis* moves workload identity to Pod Identity, which does not resolve or validate
+> against an OIDC issuer — the EKS Auth API vends the credentials. Step 10 therefore
+> does **not** need `com.amazonaws.<region>.oidc-eks`, and one prerequisite of closing
+> the public endpoint disappears.
+>
+> Kept in full rather than deleted, for two reasons: the `eks_irsa` trust type still
+> exists and is the right answer for Fargate or Windows nodes, and this is the sort of
+> finding that is expensive to rediscover. If IRSA is ever reintroduced, this endpoint
+> is a prerequisite again.
 
 Also worth recording, because it constrains anything external that validates these
 tokens: the OIDC signing key pair is rotated by EKS every seven days.
@@ -1772,7 +1846,7 @@ they are not interchangeable — see Security finding 3, part 2:
 | `${org_prefix}-${environment}-deployer-boundary` | Infrastructure roles: layer deployers | Denies reach — org and security actions, boundary removal, long-lived credentials, writes to higher layers' state |
 
 **5. Trust policies are built from typed inputs, not strings.** The module takes a
-discriminated `trust` object — one of `github_oidc`, `eks_irsa`, `aws_service`, or
+discriminated `trust` object — one of `github_oidc`, `eks_pod_identity`, `eks_irsa`, `aws_service`, or
 `account_principal` — and constructs the policy. This is where the two most expensive
 IAM bugs in this repository live, so neither is left to a caller:
 
@@ -2125,7 +2199,7 @@ policy document, it returns `implicitDeny` for every one of:
 | `eks:CreateCluster` | the cluster |
 | `ec2:CreateVpc` | the VPC, subnets, NAT, security groups |
 | `kms:CreateKey` | ECR encryption |
-| `iam:CreateOpenIDConnectProvider` | IRSA |
+| ~~`iam:CreateOpenIDConnectProvider`~~ | Was for IRSA. **No longer required** — Pod Identity creates no OIDC provider |
 | `ssm:PutParameter` | SSM parameters |
 | `secretsmanager:CreateSecret` | credentials |
 | `cognito-idp:CreateUserPool` | Cognito, if it returns |
@@ -2508,7 +2582,7 @@ why its acceptance criteria are asserted against AWS rather than against Terrafo
 
 ### Step 3 — L1 `platform`, on an empty account.
 
-The `network`, `eks-cluster`, `eks-node-group`, `irsa-role` and `ecr-repository`
+The `network`, `eks-cluster`, `eks-node-group` and `ecr-repository`
 modules, composed by the `platform` root module. EKS **1.36**. One untainted node
 group, sized from Step 1's rendered chart values, with prefix delegation enabled on
 the `vpc-cni` addon. Correct addon ordering: `vpc-cni` and `kube-proxy` on the
@@ -2631,7 +2705,7 @@ a configuration one. Two routes were considered and the first is taken:
 | Route | What you own | Verdict |
 |---|---|---|
 | `bedrock-access-gateway` — an OpenAI-compatible proxy in front of Bedrock | One more Deployment to run and patch, based on an AWS *sample* rather than a supported service. No Graphiti code | **Take this first.** Reversible, and it gets the layer working without new application code |
-| Custom `LLMClient` and embedder subclasses against boto3 | Roughly two Python files, plus structured output implemented through tool use. No extra pod; IRSA supplies credentials with no API key | Replace the proxy with this later if the proxy proves annoying |
+| Custom `LLMClient` and embedder subclasses against boto3 | Roughly two Python files, plus structured output implemented through tool use. No extra pod; Pod Identity supplies credentials with no API key | Replace the proxy with this later if the proxy proves annoying |
 
 Model configuration, from the finding 5 enumeration: **`anthropic.claude-sonnet-4-6`**
 for extraction, **`amazon.titan-embed-text-v2:0`** for embeddings. Both on-demand in
@@ -2796,8 +2870,8 @@ its own spec, with its own reasoning — it does not get absorbed into this one.
 
 | Non-goal | Why not now |
 |---|---|
-| **EKS Auto Mode** | Forces the agent's IRSA role and the OIDC provider onto Pod Identity. Two simultaneous migrations, no way to bisect a failure. *Right-Sizing Analysis* |
-| **Migrating IRSA to Pod Identity** | IRSA is not deprecated and is working for `ebs-csi`. No forcing deadline. *Right-Sizing Analysis* |
+| **EKS Auto Mode** | Changes compute, storage and load balancing all at once, on top of a module-boundary rebuild. No way to bisect a failure. *Right-Sizing Analysis* |
+| ~~**Migrating IRSA to Pod Identity**~~ | **No longer a non-goal, and no longer a migration.** The layer was destroyed, so the rebuild starts on Pod Identity directly. See the revision under *Right-Sizing Analysis* |
 | **GitOps (Flux / Argo)** for L3 | Changing the delivery mechanism and the module boundaries in one effort is the mistake this document declines to make for Auto Mode, for the same reason. Revisit once Steps 5–8 are running. *Delivery Mechanism* |
 | **A VPN or Direct Connect for developer `kubectl`** | SSM Session Manager port forwarding gives the same access with no inbound ports, no keys and a CloudTrail record. A VPN is more infrastructure for less auditability. *Step 10* |
 | **A persistent self-hosted runner fleet** | The CI runner in Step 9 is ephemeral per job. A long-lived runner accumulates state and becomes something to patch |

@@ -40,6 +40,7 @@ for re-checking, not as truth.
 | [002](002-pod-networking-and-cni.md) | Pod networking and the CNI | Why pods need networking at all when they are "just servers", what a CNI is, whether it is a Kubernetes thing or an AWS thing |
 | [003](003-eks-addons.md) | Add-ons | What "add-on" means, whether the VPC CNI needs enabling, why we declare add-ons in Terraform when EKS installs them anyway |
 | [004](004-prefix-delegation.md) | Prefix delegation | Why a `t3.medium` stops at 17 pods with CPU and memory to spare, and what changes that |
+| [005](005-irsa-and-pod-identity.md) | IRSA and Pod Identity | How a pod gets AWS credentials without a stored key, why the node role is the wrong answer, and how Pod Identity differs |
 
 ## Related, and deliberately not duplicated here
 
