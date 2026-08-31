@@ -1857,14 +1857,16 @@ acceptance criterion 2 applies once, and it is the same shape as Correctness Pro
 
 The module is genuinely parameterised — `account_name`, `environment` with a
 `validation` block, `region`, budget inputs — and is already consumed by both
-`accounts/dev` and `accounts/prod`. Three things stop it being portable, and all
-three are fixed as part of Teardown Phase 0 rather than later:
+`accounts/dev` and `accounts/prod`. Five things stop it being portable, and all
+are fixed as part of Teardown Phase 0 rather than later:
 
 | Defect | Where | Fix |
 |---|---|---|
 | `eaf-workload-boundary` and `eaf-workload-ci-role` are hardcoded literals, and the boundary ARN is rebuilt as a literal string in two policy documents | `main.tf:135,146,165,216` | An `org_prefix` input, as `bootstrap/seed` already has. Reference the boundary by `aws_iam_policy.workload_boundary.arn`, not a constructed string |
 | `github_repository_owner_id` **defaults** to `194785418` | `variables.tf` | Remove the default. A per-organisation fact must be supplied |
 | Budget name `eaf-${var.account_name}-monthly` hardcodes the prefix | `main.tf:226` | `${var.org_prefix}-${var.account_name}-monthly` |
+| `region` **defaults** to `"eu-west-2"` | `variables.tf:45` | Remove the default. A module that guesses its region is not portable, and the guess is invisible at the call site |
+| Provider constraint is `~> 5.0` | `main.tf:6` | `>= 6.0.0`. A pessimistic constraint in a *module* forbids the caller from choosing a newer major, which is the root module's decision to make and its lock file's job to pin |
 
 Note the boundary ARN being constructed as a string rather than referenced as an
 attribute: that is the same class of error as the literal-ARN reference from
@@ -2905,6 +2907,61 @@ created by some path other than the module — and names it.
 
 *Prevents: the three-competing-schemes problem, where a role name gives no clue which
 of five directories declares it.*
+
+---
+
+### Property 18: A resource's address does not depend on the order an AWS API replied in
+
+*No resource is addressed by its index in a list that came from a data source.*
+Per-zone resources use `for_each` over a map keyed by availability zone name, and any
+zone list read from a data source is `sort()`ed before use.
+
+**Why it matters.** `data.aws_availability_zones` carries no documented ordering
+guarantee. Under index addressing, a reordering by AWS moves `aws_subnet.public[0]`
+from `eu-west-2a` to `eu-west-2b`, and Terraform's answer to a changed
+`availability_zone` is destroy-and-create — taking the cluster's network interfaces
+and every pod IP with them. Sorting closes the second half: which CIDR a zone receives
+depends on its position, so an unsorted list renumbers subnets and forces replacement
+even when each subnet stays in its own zone.
+
+**How it is checked.** `modules/network/tests/` plans against a deliberately shuffled
+zone list and asserts every subnet keeps both its zone and its CIDR
+(`zone_ordering_from_the_api_does_not_move_subnets`), and asserts that lowering
+`az_count` renumbers nothing that survives
+(`dropping_an_az_leaves_the_remaining_subnets_untouched`).
+
+**Scope.** `count` remains correct for conditional creation (`? 1 : 0`), where there is
+no list and nothing can shift. The rule is about list indices, not about `count`.
+
+*Found by audit, not by failure — `modules/network` was written with `count = var.az_count`
+in violation of this repository's own stated module convention. Fixed before first apply.*
+
+---
+
+### Property 19: An OIDC issuer host is derived from its provider ARN, never restated
+
+*No module contains a literal OIDC issuer host, and no module accepts one as an input
+alongside the provider ARN it belongs to.* `modules/iam-role` derives the condition-key
+prefix by splitting `oidc_provider_arn` on `:oidc-provider/`.
+
+**Why it matters.** Two distinct defects. A literal
+`token.actions.githubusercontent.com` is correct only for github.com and makes a
+supposedly reusable module quietly deployment-specific — GitHub Enterprise Server
+issues from the appliance host. And an issuer accepted as a *separate input* can
+disagree with the ARN, producing a trust policy that is valid JSON, applies cleanly,
+and never matches; `AssumeRoleWithWebIdentity` then fails with nothing pointing at the
+mismatch. This is the same silent-failure class as the immutable-subject trap, which
+this repository has already been bitten by.
+
+**How it is checked.** `modules/iam-role/tests/` builds a role against a GitHub
+Enterprise Server provider ARN and asserts the condition keys use the appliance host
+*and* that the string `token.actions.githubusercontent.com` appears nowhere in the
+emitted policy. A variable validation rejects an issuer URL passed where a provider ARN
+belongs.
+
+*Found by audit. The module already took `oidc_issuer_host` as an input for the IRSA
+branch while hardcoding it for the GitHub branch — inconsistent within one file. The
+input was removed rather than extended.*
 
 ---
 

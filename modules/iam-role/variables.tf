@@ -146,9 +146,11 @@ variable "trust" {
       contexts          = list(string)
     }))
 
+    # No oidc_issuer_host here: it is derived from oidc_provider_arn, because an
+    # issuer given separately can disagree with the ARN and the resulting trust
+    # policy fails silently at assume-role time rather than at plan time.
     eks_irsa = optional(object({
       oidc_provider_arn = string
-      oidc_issuer_host  = string
       namespace         = string
       service_account   = string
     }))
@@ -205,6 +207,18 @@ variable "trust" {
       )
     )
     error_message = "github_oidc with immutable_subject = true requires owner_id and repository_id. They appear in the sub claim and cannot be omitted."
+  }
+  # The issuer host used in every OIDC condition key is derived by splitting the
+  # provider ARN on ":oidc-provider/". Checked here so a malformed ARN reports the
+  # real problem, rather than failing deep in a local with "index out of range".
+  validation {
+    condition = alltrue([
+      for arn in compact([
+        try(var.trust.github_oidc.oidc_provider_arn, ""),
+        try(var.trust.eks_irsa.oidc_provider_arn, ""),
+      ]) : length(split(":oidc-provider/", arn)) == 2 && endswith(split(":oidc-provider/", arn)[0], ":iam::${split(":", arn)[4]}")
+    ])
+    error_message = "oidc_provider_arn must be a full IAM OIDC provider ARN of the form arn:<partition>:iam::<account-id>:oidc-provider/<issuer-host>. Pass the provider resource's .arn attribute, not the issuer URL."
   }
 
   # Reject the shapes that do not exist. A bare branch name is the most common

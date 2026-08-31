@@ -18,7 +18,12 @@ locals {
 
   tags = merge(var.extra_tags, local.mandatory_tags)
 
-  available_azs = data.aws_availability_zones.available.names
+  # sort() is not cosmetic. Which CIDR a zone gets is decided by its POSITION in
+  # this list, so as long as the order comes from the API, a reordering silently
+  # renumbers every subnet and forces replacement. AWS documents no ordering
+  # guarantee for this data source. Sorting makes the address plan a pure function of
+  # the SET of zone names, so the same inputs always carve the same map.
+  available_azs = sort(data.aws_availability_zones.available.names)
 
   # min() rather than slicing straight to var.az_count. A bare slice past the end of
   # the list raises "end index must not be greater than the length of the list",
@@ -27,16 +32,34 @@ locals {
   # precondition on aws_vpc can report the real problem.
   azs = slice(local.available_azs, 0, min(var.az_count, length(local.available_azs)))
 
-  # Public subnets take the first az_count blocks, private the next az_count. Both
-  # are computed rather than listed, so changing az_count or subnet_newbits does not
-  # require hand-editing CIDRs — which is how the previous configuration ended up
-  # with three hardcoded /24s.
-  public_cidrs  = [for i in range(var.az_count) : cidrsubnet(var.vpc_cidr, var.subnet_newbits, i)]
-  private_cidrs = [for i in range(var.az_count) : cidrsubnet(var.vpc_cidr, var.subnet_newbits, i + var.az_count)]
+  # Subnets are keyed BY AVAILABILITY ZONE NAME, not by list index.
+  #
+  # This is the "for_each over a map, never count over a list" convention, and here
+  # it is load-bearing rather than stylistic. local.azs comes from a data source. If
+  # AWS ever returns those names in a different order, count-based addressing moves
+  # aws_subnet.public[0] from eu-west-2a to eu-west-2b — and Terraform destroys and
+  # recreates subnets in different availability zones, taking the cluster's network
+  # interfaces and everything in them.
+  #
+  # AWS makes AZ identity load-bearing too: any subnet added to a cluster later must
+  # be in the same set of zones given at creation. Keying by zone name means the
+  # resource address IS the zone, so a reordering is a no-op and removing a zone
+  # removes only that zone's subnets.
+  #
+  # Public takes the first az_count blocks, private the next az_count. Computed
+  # rather than listed, so changing az_count or subnet_newbits needs no hand-edited
+  # CIDRs — which is how the previous configuration ended up with six hardcoded /24s.
+  public_cidr_by_az  = { for i, az in local.azs : az => cidrsubnet(var.vpc_cidr, var.subnet_newbits, i) }
+  private_cidr_by_az = { for i, az in local.azs : az => cidrsubnet(var.vpc_cidr, var.subnet_newbits, i + var.az_count) }
 
-  # One NAT, or one per AZ. Private subnets route to the NAT in their own AZ when
-  # there is one, otherwise to the single shared NAT.
-  nat_count = var.single_nat_gateway ? 1 : var.az_count
+  # One NAT, or one per AZ. With a single NAT it lives in the first zone
+  # alphabetically — deterministic, so the choice does not drift between plans.
+  nat_azs = var.single_nat_gateway ? slice(local.azs, 0, 1) : local.azs
+
+  # Which NAT each private subnet routes through. With one NAT every zone shares it;
+  # with one per zone each routes to its own, so traffic never crosses an
+  # availability boundary.
+  nat_az_for = { for az in local.azs : az => var.single_nat_gateway ? local.azs[0] : az }
 }
 
 data "aws_availability_zones" "available" {
@@ -96,11 +119,11 @@ resource "aws_vpc" "this" {
 # ── Public subnets: internet-facing load balancers, and the NAT gateways ──────
 
 resource "aws_subnet" "public" {
-  count = var.az_count
+  for_each = local.public_cidr_by_az
 
   vpc_id            = aws_vpc.this.id
-  cidr_block        = local.public_cidrs[count.index]
-  availability_zone = local.azs[count.index]
+  cidr_block        = each.value
+  availability_zone = each.key
 
   # Required for managed node groups deployed to a public subnet. No nodes are
   # placed here — they go in private subnets — but load balancers and anything
@@ -109,7 +132,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = merge(local.tags, {
-    Name = "${local.name}-public-${local.azs[count.index]}"
+    Name = "${local.name}-public-${each.key}"
 
     # Marks this subnet as a candidate for INTERNET-FACING load balancers.
     # Without it the AWS Load Balancer Controller cannot discover the subnet and a
@@ -124,14 +147,14 @@ resource "aws_subnet" "public" {
 # ── Private subnets: every node, and internal load balancers ─────────────────
 
 resource "aws_subnet" "private" {
-  count = var.az_count
+  for_each = local.private_cidr_by_az
 
   vpc_id            = aws_vpc.this.id
-  cidr_block        = local.private_cidrs[count.index]
-  availability_zone = local.azs[count.index]
+  cidr_block        = each.value
+  availability_zone = each.key
 
   tags = merge(local.tags, {
-    Name = "${local.name}-private-${local.azs[count.index]}"
+    Name = "${local.name}-private-${each.key}"
 
     # Marks this subnet as a candidate for INTERNAL load balancers.
     "kubernetes.io/role/internal-elb" = "1"
@@ -159,9 +182,9 @@ resource "aws_route" "public_internet" {
 }
 
 resource "aws_route_table_association" "public" {
-  count = var.az_count
+  for_each = aws_subnet.public
 
-  subnet_id      = aws_subnet.public[count.index].id
+  subnet_id      = each.value.id
   route_table_id = aws_route_table.public.id
 }
 
@@ -175,21 +198,25 @@ resource "aws_route_table_association" "public" {
 # internet egress.
 
 resource "aws_eip" "nat" {
-  count = local.nat_count
+  for_each = toset(local.nat_azs)
 
   domain = "vpc"
-  tags   = merge(local.tags, { Name = "${local.name}-nat-${count.index}" })
+
+  # Named for the zone, not an index. An elastic IP is a billable, allocatable
+  # object and its address is quoted in firewall allowlists downstream, so a stable
+  # identity that survives a change to az_count matters more here than most places.
+  tags = merge(local.tags, { Name = "${local.name}-nat-${each.key}" })
 
   depends_on = [aws_internet_gateway.this]
 }
 
 resource "aws_nat_gateway" "this" {
-  count = local.nat_count
+  for_each = toset(local.nat_azs)
 
-  allocation_id = aws_eip.nat[count.index].id
-  subnet_id     = aws_subnet.public[count.index].id
+  allocation_id = aws_eip.nat[each.key].id
+  subnet_id     = aws_subnet.public[each.key].id
 
-  tags = merge(local.tags, { Name = "${local.name}-nat-${count.index}" })
+  tags = merge(local.tags, { Name = "${local.name}-nat-${each.key}" })
 
   depends_on = [aws_internet_gateway.this]
 }
@@ -198,26 +225,26 @@ resource "aws_nat_gateway" "this" {
 # nothing, and it means switching single_nat_gateway to false later changes routes
 # rather than restructuring route tables.
 resource "aws_route_table" "private" {
-  count = var.az_count
+  for_each = toset(local.azs)
 
   vpc_id = aws_vpc.this.id
-  tags   = merge(local.tags, { Name = "${local.name}-private-${local.azs[count.index]}" })
+  tags   = merge(local.tags, { Name = "${local.name}-private-${each.key}" })
 }
 
 resource "aws_route" "private_nat" {
-  count = var.az_count
+  # Keyed by the private subnet's zone; the value is the zone whose NAT it uses.
+  # With one NAT every zone maps to the same one, with one per zone each maps to
+  # itself, so this single expression covers both without a conditional.
+  for_each = local.nat_az_for
 
-  route_table_id         = aws_route_table.private[count.index].id
+  route_table_id         = aws_route_table.private[each.key].id
   destination_cidr_block = "0.0.0.0/0"
-
-  # With one NAT, every private subnet routes to it. With one per AZ, each routes
-  # to the NAT in its own zone so traffic never crosses an availability boundary.
-  nat_gateway_id = var.single_nat_gateway ? aws_nat_gateway.this[0].id : aws_nat_gateway.this[count.index].id
+  nat_gateway_id         = aws_nat_gateway.this[each.value].id
 }
 
 resource "aws_route_table_association" "private" {
-  count = var.az_count
+  for_each = aws_subnet.private
 
-  subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private[count.index].id
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.private[each.key].id
 }

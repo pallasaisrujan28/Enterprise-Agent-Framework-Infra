@@ -18,15 +18,15 @@ mock_provider "aws" {
   # gateway's subnet_id against a subnet's id has two unknowns and cannot evaluate.
   # Overriding the ids makes the relationship checkable without an apply.
   override_resource {
-    target          = aws_subnet.public[0]
+    target          = aws_subnet.public["eu-west-2a"]
     override_during = plan
-    values          = { id = "subnet-public-0" }
+    values          = { id = "subnet-public-eu-west-2a" }
   }
 
   override_resource {
-    target          = aws_subnet.private[0]
+    target          = aws_subnet.private["eu-west-2a"]
     override_during = plan
-    values          = { id = "subnet-private-0" }
+    values          = { id = "subnet-private-eu-west-2a" }
   }
 }
 
@@ -48,23 +48,23 @@ run "default_carves_slash20_subnets" {
 
   # /16 + 4 newbits = /20. Public takes blocks 0..az_count-1, private the next.
   assert {
-    condition     = aws_subnet.public[0].cidr_block == "10.0.0.0/20"
-    error_message = "public[0] should be 10.0.0.0/20, got ${aws_subnet.public[0].cidr_block}"
+    condition     = aws_subnet.public["eu-west-2a"].cidr_block == "10.0.0.0/20"
+    error_message = "the eu-west-2a public subnet should be 10.0.0.0/20, got ${aws_subnet.public["eu-west-2a"].cidr_block}"
   }
 
   assert {
-    condition     = aws_subnet.public[1].cidr_block == "10.0.16.0/20"
-    error_message = "public[1] should be 10.0.16.0/20, got ${aws_subnet.public[1].cidr_block}"
+    condition     = aws_subnet.public["eu-west-2b"].cidr_block == "10.0.16.0/20"
+    error_message = "the eu-west-2b public subnet should be 10.0.16.0/20, got ${aws_subnet.public["eu-west-2b"].cidr_block}"
   }
 
   assert {
-    condition     = aws_subnet.private[0].cidr_block == "10.0.32.0/20"
-    error_message = "private[0] should be 10.0.32.0/20, got ${aws_subnet.private[0].cidr_block}"
+    condition     = aws_subnet.private["eu-west-2a"].cidr_block == "10.0.32.0/20"
+    error_message = "the eu-west-2a private subnet should be 10.0.32.0/20, got ${aws_subnet.private["eu-west-2a"].cidr_block}"
   }
 
   assert {
-    condition     = aws_subnet.private[1].cidr_block == "10.0.48.0/20"
-    error_message = "private[1] should be 10.0.48.0/20, got ${aws_subnet.private[1].cidr_block}"
+    condition     = aws_subnet.private["eu-west-2b"].cidr_block == "10.0.48.0/20"
+    error_message = "the eu-west-2b private subnet should be 10.0.48.0/20, got ${aws_subnet.private["eu-west-2b"].cidr_block}"
   }
 }
 
@@ -100,8 +100,8 @@ run "subnet_newbits_8_gives_slash24" {
   }
 
   assert {
-    condition     = aws_subnet.private[0].cidr_block == "10.0.2.0/24"
-    error_message = "with subnet_newbits = 8 private[0] should be 10.0.2.0/24, got ${aws_subnet.private[0].cidr_block}"
+    condition     = aws_subnet.private["eu-west-2a"].cidr_block == "10.0.2.0/24"
+    error_message = "with subnet_newbits = 8 the eu-west-2a private subnet should be 10.0.2.0/24, got ${aws_subnet.private["eu-west-2a"].cidr_block}"
   }
 }
 
@@ -127,12 +127,12 @@ run "load_balancer_discovery_tags_are_present" {
   command = plan
 
   assert {
-    condition     = aws_subnet.public[0].tags["kubernetes.io/role/elb"] == "1"
+    condition     = aws_subnet.public["eu-west-2a"].tags["kubernetes.io/role/elb"] == "1"
     error_message = "public subnets need kubernetes.io/role/elb = 1 or the load balancer controller cannot discover them"
   }
 
   assert {
-    condition     = aws_subnet.private[0].tags["kubernetes.io/role/internal-elb"] == "1"
+    condition     = aws_subnet.private["eu-west-2a"].tags["kubernetes.io/role/internal-elb"] == "1"
     error_message = "private subnets need kubernetes.io/role/internal-elb = 1 for internal load balancers"
   }
 }
@@ -141,12 +141,12 @@ run "public_subnets_auto_assign_public_ips" {
   command = plan
 
   assert {
-    condition     = aws_subnet.public[0].map_public_ip_on_launch == true
+    condition     = aws_subnet.public["eu-west-2a"].map_public_ip_on_launch == true
     error_message = "AWS requires auto-assign public IPv4 on public subnets used by managed node groups"
   }
 
   assert {
-    condition     = aws_subnet.private[0].map_public_ip_on_launch != true
+    condition     = aws_subnet.private["eu-west-2a"].map_public_ip_on_launch != true
     error_message = "private subnets must not auto-assign public IPs"
   }
 }
@@ -243,7 +243,7 @@ run "nat_gateways_live_in_public_subnets" {
   # A NAT gateway in a private subnet has no path to the internet. The failure is
   # not a validation error — it is traffic silently going nowhere.
   assert {
-    condition     = aws_nat_gateway.this[0].subnet_id == aws_subnet.public[0].id
+    condition     = aws_nat_gateway.this["eu-west-2a"].subnet_id == aws_subnet.public["eu-west-2a"].id
     error_message = "NAT gateway must be in a public subnet"
   }
 }
@@ -334,6 +334,86 @@ run "reject_unknown_environment" {
   }
 
   expect_failures = [var.environment]
+}
+
+# ── Stability of the address plan ────────────────────────────────────────────
+#
+# The regression these two guard against: subnets keyed by list index. Because the
+# zone list comes from a data source with no documented ordering, index-based
+# addressing means a reordering by AWS moves a subnet into a different availability
+# zone, and Terraform's answer to a changed availability_zone is destroy and create
+# — taking the cluster's network interfaces and every pod IP with it.
+
+run "zone_ordering_from_the_api_does_not_move_subnets" {
+  command = plan
+
+  variables {
+    az_count = 3
+  }
+
+  # The same three zones, deliberately shuffled.
+  override_data {
+    target = data.aws_availability_zones.available
+    values = {
+      names = ["eu-west-2c", "eu-west-2a", "eu-west-2b"]
+    }
+  }
+
+  # Every subnet is still in the zone that names it, and still holds the block it
+  # would hold had the list arrived sorted: public takes blocks 0-2, private 3-5, in
+  # zone order. None of these values depends on the order the API replied in.
+  assert {
+    condition     = aws_subnet.public["eu-west-2a"].availability_zone == "eu-west-2a"
+    error_message = "a subnet keyed eu-west-2a must be in eu-west-2a regardless of API ordering"
+  }
+
+  assert {
+    condition = alltrue([
+      aws_subnet.public["eu-west-2a"].cidr_block == "10.0.0.0/20",
+      aws_subnet.public["eu-west-2b"].cidr_block == "10.0.16.0/20",
+      aws_subnet.public["eu-west-2c"].cidr_block == "10.0.32.0/20",
+    ])
+    error_message = "shuffled zone ordering renumbered the public subnets, which would force replacement"
+  }
+
+  assert {
+    condition = alltrue([
+      aws_subnet.private["eu-west-2a"].cidr_block == "10.0.48.0/20",
+      aws_subnet.private["eu-west-2b"].cidr_block == "10.0.64.0/20",
+      aws_subnet.private["eu-west-2c"].cidr_block == "10.0.80.0/20",
+    ])
+    error_message = "shuffled zone ordering renumbered the private subnets"
+  }
+
+  # And the ordered outputs stay in zone order, not API order, so a caller indexing
+  # private_subnet_ids[0] is not handed a different zone than it had yesterday.
+  assert {
+    # join() rather than ==, because the output is a tuple and the literal is a list;
+    # comparing them directly is always false and warns about mismatched types.
+    condition     = join(",", output.availability_zones) == "eu-west-2a,eu-west-2b,eu-west-2c"
+    error_message = "availability_zones output should be in zone order, got ${jsonencode(output.availability_zones)}"
+  }
+}
+
+run "dropping_an_az_leaves_the_remaining_subnets_untouched" {
+  command = plan
+
+  variables {
+    az_count = 2
+  }
+
+  # Going from three zones to two must not renumber the two that remain. With list
+  # indices this holds only by luck — it is the removal of a MIDDLE element that
+  # shifts everything after it.
+  assert {
+    condition     = aws_subnet.public["eu-west-2a"].cidr_block == "10.0.0.0/20"
+    error_message = "reducing az_count renumbered a surviving subnet"
+  }
+
+  assert {
+    condition     = length(aws_subnet.public) == 2 && !contains(keys(aws_subnet.public), "eu-west-2c")
+    error_message = "reducing az_count should drop exactly the last zone"
+  }
 }
 
 # ── Inventory ────────────────────────────────────────────────────────────────

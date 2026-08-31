@@ -30,6 +30,20 @@ locals {
 
   gh = var.trust.github_oidc
 
+  # The prefix on every OIDC condition key is the provider's issuer host and path,
+  # which is exactly the part of the provider ARN after ":oidc-provider/".
+  #
+  # DERIVED, not taken as an input and not written as a literal. Two reasons. A
+  # literal "token.actions.githubusercontent.com" is wrong for GitHub Enterprise
+  # Server, whose issuer is the appliance host — so hardcoding it puts a deployment
+  # assumption inside a module that claims to be reusable. And an issuer supplied
+  # separately from the ARN can disagree with it, which produces a trust policy that
+  # is valid JSON, applies cleanly, and then never matches: AssumeRoleWithWebIdentity
+  # just fails, with nothing pointing at the mismatch. Deriving removes the
+  # opportunity. Same failure class as the immutable-subject trap below.
+  gh_issuer   = local.gh == null ? "" : split(":oidc-provider/", local.gh.oidc_provider_arn)[1]
+  irsa_issuer = local.irsa == null ? "" : split(":oidc-provider/", local.irsa.oidc_provider_arn)[1]
+
   # repo segment: immutable form embeds owner and repository IDs, separated by @
   # because @ cannot appear in a GitHub username or repository name.
   gh_repo_segment = local.gh == null ? "" : (
@@ -53,13 +67,13 @@ locals {
       Condition = {
         # aud is checked with StringEquals: it is a single expected value.
         StringEquals = {
-          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          "${local.gh_issuer}:aud" = "sts.amazonaws.com"
         }
         # sub is checked with StringLike because a context may contain a wildcard
         # (for example ref:refs/heads/* ). Where no wildcard is present StringLike
         # behaves as an exact match, so this is not a widening.
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = local.gh_subjects
+          "${local.gh_issuer}:sub" = local.gh_subjects
         }
       }
     }]
@@ -73,8 +87,8 @@ locals {
         StringEquals = {
           # Both conditions, always. An IRSA trust policy with :sub but no :aud is
           # broader than intended, so the module does not let a caller omit it.
-          "${local.irsa.oidc_issuer_host}:sub" = "system:serviceaccount:${local.irsa.namespace}:${local.irsa.service_account}"
-          "${local.irsa.oidc_issuer_host}:aud" = "sts.amazonaws.com"
+          "${local.irsa_issuer}:sub" = "system:serviceaccount:${local.irsa.namespace}:${local.irsa.service_account}"
+          "${local.irsa_issuer}:aud" = "sts.amazonaws.com"
         }
       }
     }]

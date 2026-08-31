@@ -65,6 +65,31 @@ Changing the AZ count or the VPC CIDR meant hand-editing addresses. Here they co
 from `cidrsubnet()`, driven by `az_count` and `subnet_newbits`, with public taking
 the first `az_count` blocks and private the next.
 
+### Subnets are keyed by availability zone
+
+Every per-zone resource uses `for_each` over a map keyed by AZ name — never `count`
+over a list. This one is load-bearing rather than stylistic.
+
+The zone list comes from `data.aws_availability_zones`, and AWS documents no ordering
+guarantee for it. Under index-based addressing, a reordering moves
+`aws_subnet.public[0]` from `eu-west-2a` to `eu-west-2b`; Terraform's answer to a
+changed `availability_zone` is destroy and create, so the cluster's network interfaces
+and every pod IP go with it. Keying by zone name makes the resource address *be* the
+zone.
+
+`local.available_azs` is also `sort()`ed, which closes the other half of the problem:
+which CIDR a zone receives depends on its position in the list, so without sorting a
+reordering renumbers subnets and forces replacement even when each one stays in its
+own zone. Sorting makes the address plan a pure function of the *set* of zone names.
+
+Two tests cover this — `zone_ordering_from_the_api_does_not_move_subnets` plans against
+a deliberately shuffled zone list, and
+`dropping_an_az_leaves_the_remaining_subnets_untouched` checks that lowering
+`az_count` renumbers nothing that survives.
+
+`count` is still the right tool for conditional *creation* (`? 1 : 0`), where nothing
+can shift. The rule is about list indices.
+
 ### 3. Subnets default to `/20`, not `/24`
 
 This one interacts with a decision made elsewhere, and it is the reason the default
@@ -101,13 +126,22 @@ Pass `subnet_newbits = 8` for `/24`s if a smaller VPC ever makes that necessary.
 ## Outputs
 
 `vpc_id`, `vpc_cidr`, `public_subnet_ids`, `private_subnet_ids`,
-`private_route_table_ids`, `availability_zones`, `nat_gateway_ids`, and `inventory`.
+`public_subnet_ids_by_az`, `private_subnet_ids_by_az`, `private_route_table_ids`,
+`availability_zones`, `nat_gateway_ids`, `nat_public_ips`, and `inventory`.
 
-Two worth explaining.
+The list forms are ordered by availability zone, not by the order the AWS API
+happened to reply in. A few worth explaining.
 
 **`availability_zones`** is propagated rather than left to be recomputed. AWS
 requires that any subnet added to a cluster later be in the same set of AZs as those
 given at creation, which makes the chosen set a durable fact about the cluster.
+
+**`private_subnet_ids_by_az`** exists for anything zone-pinned. An EBS volume only
+attaches to a node in its own zone, so a stateful workload's node group and its
+storage have to agree on one — and a list index is a poor way to express that.
+
+**`nat_public_ips`** is the source address every outbound connection from a node
+appears to come from, which is what a third party puts in an allowlist.
 
 **`private_route_table_ids`** exists for Step 10. Closing the public cluster
 endpoint requires VPC interface endpoints — including

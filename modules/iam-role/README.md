@@ -88,7 +88,7 @@ module "agent_role" {
     type = "eks_irsa"
     eks_irsa = {
       oidc_provider_arn = aws_iam_openid_connect_provider.eks.arn
-      oidc_issuer_host  = local.oidc_provider # host/path, no https://
+      # The issuer host is derived from this ARN — do not pass it separately.
       namespace         = "eaf"
       service_account   = "eaf-agent"
     }
@@ -134,6 +134,25 @@ removed. **This repository uses that format.** A trust policy written in the old
 
 `immutable_subject` defaults to `true` and requires `owner_id` and `repository_id`.
 Set it to `false` only for a repository known to be on the legacy format.
+
+### 3. The issuer host is derived, never restated
+
+Every OIDC condition key is prefixed with the provider's issuer host and path
+(`token.actions.githubusercontent.com:sub`, `oidc.eks.<region>.amazonaws.com/id/<id>:aud`).
+The module derives that prefix from `oidc_provider_arn` by splitting on
+`:oidc-provider/`. There is no input for it.
+
+Two reasons it is not a literal or an input:
+
+- Writing `token.actions.githubusercontent.com` into the module is correct only for
+  github.com. GitHub Enterprise Server issues tokens from the appliance host, so a
+  hardcoded issuer makes the module quietly github.com-specific.
+- An issuer accepted as an input *alongside* the ARN can disagree with it. The result
+  is valid JSON that applies cleanly and never matches — the same silent-failure class
+  as the subject format above. Deriving removes the opportunity to get them apart.
+
+Pass the provider resource's `.arn` attribute. Passing an issuer URL such as
+`https://token.actions.githubusercontent.com` is rejected at plan time.
 
 ## Permissions boundaries
 

@@ -227,7 +227,6 @@ run "irsa_emits_both_sub_and_aud" {
       type = "eks_irsa"
       eks_irsa = {
         oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/oidc.eks.eu-west-2.amazonaws.com/id/ABCDEF"
-        oidc_issuer_host  = "oidc.eks.eu-west-2.amazonaws.com/id/ABCDEF"
         namespace         = "eaf"
         service_account   = "eaf-agent"
       }
@@ -247,6 +246,74 @@ run "irsa_emits_both_sub_and_aud" {
     )
     error_message = "IRSA aud condition missing — a documented way to make the trust policy too broad."
   }
+}
+
+# ── The issuer host is derived, never assumed ────────────────────────────────
+
+run "github_issuer_host_comes_from_the_provider_arn" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "ci-runner"
+    trust = {
+      type = "github_oidc"
+      github_oidc = {
+        # A GitHub Enterprise Server appliance. Its issuer is the appliance host, not
+        # token.actions.githubusercontent.com — so a module with that host written in
+        # as a literal emits a trust policy that can never match.
+        oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/github.example.com/_services/token"
+        owner             = "acme"
+        owner_id          = "1"
+        repository        = "infra"
+        repository_id     = "2"
+        contexts          = ["ref:refs/heads/main"]
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringEquals["github.example.com/_services/token:aud"] == "sts.amazonaws.com"
+    )
+    error_message = "aud condition key did not use the issuer from the provider ARN."
+  }
+
+  assert {
+    condition = (
+      jsondecode(aws_iam_role.this.assume_role_policy).Statement[0].Condition.StringLike["github.example.com/_services/token:sub"][0] == "repo:acme@1/infra@2:ref:refs/heads/main"
+    )
+    error_message = "sub condition key did not use the issuer from the provider ARN."
+  }
+
+  # And nothing anywhere in the policy mentions the github.com issuer.
+  assert {
+    condition     = !strcontains(aws_iam_role.this.assume_role_policy, "token.actions.githubusercontent.com")
+    error_message = "the github.com issuer host is hardcoded somewhere in the trust policy."
+  }
+}
+
+run "reject_issuer_url_passed_instead_of_provider_arn" {
+  command = plan
+
+  variables {
+    layer   = "platform"
+    purpose = "ci-runner"
+    trust = {
+      type = "github_oidc"
+      github_oidc = {
+        # The most likely mistake now that the issuer is derived: passing the URL.
+        oidc_provider_arn = "https://token.actions.githubusercontent.com"
+        owner             = "acme"
+        owner_id          = "1"
+        repository        = "infra"
+        repository_id     = "2"
+        contexts          = ["ref:refs/heads/main"]
+      }
+    }
+  }
+
+  expect_failures = [var.trust]
 }
 
 # ── Permissions boundary ──────────────────────────────────────────────────────
