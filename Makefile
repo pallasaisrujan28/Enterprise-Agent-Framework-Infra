@@ -9,7 +9,7 @@ SHELL := /bin/bash
 # workloads/eaf/dev/{platform,cluster-addons,apps} are appended at design Steps 3
 # and 4, when those directories exist. They are not listed pre-emptively because
 # the check treats a missing directory as an error, not as an empty layer.
-IAM_LAYERS := accounts/dev accounts/prod
+IAM_LAYERS := accounts/dev accounts/prod workloads/dev/platform
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
 
@@ -29,11 +29,23 @@ lint:
 # ── Validation ─────────────────────────────────────────────────────────────────
 # Validates every directory that contains .tf files. Mirrors the CI static job.
 
+# NOTE: no `-upgrade` on the init below, deliberately.
+#
+# With it, running `make validate` on a workstation REWRITES every committed
+# .terraform.lock.hcl with hashes for the local platform only. A macOS-generated lock
+# file omits linux_amd64, and CI then fails with "provider does not have a package
+# available for your current platform" — which looks like a registry outage and is not.
+#
+# Without it, init uses the committed lock file when there is one. To deliberately move
+# a provider version, do it for every platform that runs it:
+#
+#   terraform providers lock \
+#     -platform=darwin_arm64 -platform=darwin_amd64 -platform=linux_amd64
 validate:
 	@set -euo pipefail; \
 	for dir in $$(find . -name '*.tf' -not -path './.git/*' -exec dirname {} \; | sort -u); do \
 	  echo "validating $$dir ..."; \
-	  terraform -chdir=$$dir init -backend=false -input=false -no-color -upgrade > /dev/null; \
+	  terraform -chdir=$$dir init -backend=false -input=false -no-color > /dev/null; \
 	  terraform -chdir=$$dir validate -no-color; \
 	done
 
