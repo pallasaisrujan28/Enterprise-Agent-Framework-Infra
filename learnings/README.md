@@ -41,6 +41,7 @@ for re-checking, not as truth.
 | [003](003-eks-addons.md) | Add-ons | What "add-on" means, whether the VPC CNI needs enabling, why we declare add-ons in Terraform when EKS installs them anyway |
 | [004](004-prefix-delegation.md) | Prefix delegation | Why a `t3.medium` stops at 17 pods with CPU and memory to spare, and what changes that |
 | [005](005-irsa-and-pod-identity.md) | IRSA and Pod Identity | How a pod gets AWS credentials without a stored key, why the node role is the wrong answer, and how Pod Identity differs |
+| [006](006-csi-drivers-and-storage-classes.md) | CSI drivers and StorageClasses | What a CSI driver is and why storage moved out of Kubernetes, the journey of one volume, and where the `gp2` class EKS creates for you came from |
 
 ## Related, and deliberately not duplicated here
 
