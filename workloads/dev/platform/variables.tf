@@ -187,30 +187,3 @@ variable "node_disk_size" {
   type        = number
   default     = 50
 }
-
-# ── Container registries ──────────────────────────────────────────────────────
-
-variable "ecr_repositories" {
-  description = <<-EOT
-    Repositories to create. One per image that gets deployed.
-
-    A slash is a naming convention, not a hierarchy — `eaf/agent` is a single repository
-    whose name contains a slash.
-
-    `eaf/agent` is built by the APPLICATION repository's workflow, not this one. It is
-    created here because the registry is infrastructure and the image is not: the
-    repository must exist before anything can push to it, and a push to a missing
-    repository fails with a message about authorisation rather than about absence.
-  EOT
-  type        = list(string)
-  default = [
-    "eaf/agent",
-    "tools/firecrawl",
-    "tools/firecrawl-playwright",
-  ]
-
-  validation {
-    condition     = length(var.ecr_repositories) == length(toset(var.ecr_repositories))
-    error_message = "ecr_repositories must not contain duplicates."
-  }
-}
