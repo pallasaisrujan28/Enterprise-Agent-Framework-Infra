@@ -158,5 +158,31 @@ output "platform_inventory" {
     # Whether the pod-IP budget is actually large enough for the node count, or whether
     # the subnet is the binding constraint rather than the instance size.
     usable_ips_per_private_subnet = module.network.inventory.usable_ips_per_subnet
+
+    registries = { for k, m in module.ecr : k => m.inventory }
+
+    # One boolean for the property that makes a rollback trustworthy: every repository
+    # rejects an attempt to move an existing tag, so a deployed reference means exactly
+    # one image forever.
+    all_image_tags_immutable = alltrue([for k, m in module.ecr : m.inventory.tags_are_immutable])
   }
+}
+
+# ── Container registries ──────────────────────────────────────────────────────
+
+output "ecr_repository_urls" {
+  description = <<-EOT
+    Repository URLs, keyed by repository name.
+
+    Consumed by whatever builds and pushes images — including the application
+    repository's workflow, which needs `eaf/agent`. Pass this rather than reconstructing
+    `<account>.dkr.ecr.<region>.amazonaws.com/<name>`: a reconstructed string creates no
+    dependency edge, so a change here breaks the consumer silently.
+  EOT
+  value       = { for k, m in module.ecr : k => m.repository_url }
+}
+
+output "ecr_registry_id" {
+  description = "The account hosting the registry. Needed by `aws ecr get-login-password` before a push."
+  value       = one(distinct([for k, m in module.ecr : m.registry_id]))
 }
