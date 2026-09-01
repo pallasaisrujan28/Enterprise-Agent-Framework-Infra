@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-.PHONY: fmt fmt-check lint validate check install-hooks test iam-inventory iam-orphans
+.PHONY: fmt fmt-check lint validate check install-hooks test iam-inventory iam-orphans topology
 
 # Layers whose state may contain IAM roles. Used by the IAM inventory and orphan
 # checks. ADD NEW LAYERS HERE AS THEY ARE CREATED — a layer missing from this list
@@ -96,6 +96,18 @@ iam-orphans:
 #
 # Cluster-provisioned volumes are identifiable: the CSI driver tags them with
 # kubernetes.io/created-for/pvc/name and ebs.csi.aws.com/cluster-name.
+# ── Topology ───────────────────────────────────────────────────────────────────
+# Draw the LIVE AWS topology as Mermaid, which renders in VS Code and on GitHub
+# without a plugin or a rendering step.
+#
+# Read from the AWS API rather than from state or configuration, deliberately: a
+# diagram built from configuration shows what should exist. This one shows what does.
+# Those differ exactly when it matters.
+#
+# Read-only. Every call is a describe or a list.
+topology:
+	@python3 scripts/aws_topology.py -o docs/topology.md
+
 storage-orphans:
 	@python3 scripts/iam_inventory.py storage-orphans
 
