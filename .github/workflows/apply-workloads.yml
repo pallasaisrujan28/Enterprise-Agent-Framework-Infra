@@ -19,6 +19,7 @@ on:
         type: choice
         options:
           - platform
+          - cluster-addons
       plan_only:
         description: "Plan and stop. Leave checked to review before changing anything."
         required: false
