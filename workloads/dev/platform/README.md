@@ -92,18 +92,75 @@ aws eks describe-addon-versions --kubernetes-version 1.36 --addon-name vpc-cni \
   --query 'addons[0].addonVersions[?compatibilities[0].defaultVersion==`true`].addonVersion'
 ```
 
-## After the first apply
+## Cluster access
 
-Two things this layer cannot verify for itself:
+`authentication_mode` is `API`, so the access entries in this layer are the **only** way
+to reach the Kubernetes API. There is no `aws-auth` ConfigMap to fall back on, and the
+symptom of getting it wrong is an authorization error from `kubectl` that points at
+nothing.
 
-- **`kubectl` access for a human.** `additional_cluster_admin_role_arns` is empty. Add
-  your SSO role once the cluster exists — AWS documents removing the *path* from a role
-  ARN for cluster access, and an SSO ARN contains
-  `/aws-reserved/sso.amazonaws.com/<region>/`, so this is worth verifying against the
-  live cluster rather than guessing. A wrong ARN produces an entry that silently never
-  matches.
-- **That prefix delegation took effect.** `kubectl get node -o jsonpath='{..allocatable.pods}'`
-  should report 110, not 29.
+Three sources, all visible in the `cluster_admins` output:
+
+| Source | What |
+|---|---|
+| `deployer` | `OrganizationAccountAccessRole`, which the provider assumes. Without it this layer cannot manage the cluster |
+| `sso_admin_permission_sets` | Humans, via IAM Identity Center. **Discovered, not hardcoded** |
+| `additional_cluster_admin_role_arns` | Anything named explicitly |
+
+### Why the SSO roles are discovered
+
+Identity Center appends a random suffix to the role it creates for a permission set —
+`AWSReservedSSO_AWSAdministratorAccess_a8fd6486dea1ff46`. **That suffix changes if the
+permission set is reprovisioned**, and AWS is explicit that an access entry stops working
+when its principal is recreated *even at the same ARN*, because the entry is keyed to the
+role's id. Hardcoding it works until it silently doesn't.
+
+So `data.aws_iam_roles` looks them up by permission set name, anchored on both sides.
+The anchoring matters: this account has both `AdministratorAccess` **and**
+`AWSAdministratorAccess`, and a loose pattern would grant cluster-admin to a permission
+set nobody asked for.
+
+Map keys are the *permission set* name, not the role name, so reprovisioning does not
+move the resource address and recreate the entry for no reason.
+
+A `check` block reports any permission set that resolved to something other than exactly
+one role. It is a check rather than a precondition on purpose: missing human access is a
+degradation, not a breakage — the deployer still has admin, so the layer should still
+apply.
+
+**A path in the principal ARN is fine.** AWS documents that an access entry's ARN may
+include a path; it is the deprecated `aws-auth` ConfigMap that could not. The two rules
+are easy to conflate and an earlier version of this file assumed the stricter one.
+
+### Getting a kubeconfig
+
+```sh
+terraform output -raw kubeconfig_command   # or just:
+aws eks update-kubeconfig --name eaf-dev --region eu-west-2
+```
+
+Then confirm prefix delegation actually took effect — this is the number it changes:
+
+```sh
+kubectl get nodes -o jsonpath='{.items[*].status.allocatable.pods}'
+```
+
+Expect **110** per node. `29` means prefix delegation is not active, and it cannot be
+fixed on running nodes — they have to be replaced.
+
+## Tearing it down
+
+```
+Actions → Destroy workloads → target: dev, layer: platform, plan_only: ✓
+```
+
+Same shape as the apply: dry run by default, then dispatch again with `plan_only`
+unchecked and `destroy` typed in the confirm field.
+
+**Destroy in reverse dependency order.** This layer holds the cluster, so destroying it
+while `cluster-addons` or `apps` still have state leaves those layers pointing at a
+cluster that no longer exists — and their own destroy then cannot run, because the
+Kubernetes provider cannot reach an endpoint that is gone.
 
 ## Outputs
 

@@ -1,5 +1,22 @@
 data "aws_caller_identity" "current" {}
 
+# The IAM roles IAM Identity Center creates for the named permission sets.
+#
+# Looked up rather than written down. Identity Center appends a random suffix to each
+# role name, and that suffix changes if the permission set is reprovisioned — at which
+# point a hardcoded access entry silently stops working, because AWS keys an access
+# entry to the role's id and not only its ARN.
+#
+# Anchored on both sides. This account has `AdministratorAccess` AND
+# `AWSAdministratorAccess`; an unanchored pattern would hand cluster-admin to a
+# permission set nobody named.
+data "aws_iam_roles" "sso_admins" {
+  count = length(var.sso_admin_permission_sets) > 0 ? 1 : 0
+
+  path_prefix = "/aws-reserved/sso.amazonaws.com/"
+  name_regex  = "^AWSReservedSSO_(${join("|", var.sso_admin_permission_sets)})_[0-9a-f]+$"
+}
+
 locals {
   # The identity EKS actually sees.
   #
@@ -14,6 +31,46 @@ locals {
   deployer_role_arn = "arn:aws:iam::${var.account_id}:role/OrganizationAccountAccessRole"
 
   eks_cluster_admin_policy = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  # Everything granted cluster-admin, from three sources, in one map.
+  #
+  # Keys become resource addresses, so they must be stable and readable. The SSO entries
+  # key on the PERMISSION SET name rather than the role name, deliberately: the role name
+  # carries a random suffix, and keying on it would move the resource address every time
+  # the permission set is reprovisioned — destroying and recreating the access entry for
+  # no reason.
+  sso_admin_arns = length(var.sso_admin_permission_sets) > 0 ? tolist(data.aws_iam_roles.sso_admins[0].arns) : []
+
+  cluster_admins = merge(
+    # The pipeline. Without this the layer cannot manage anything inside the cluster,
+    # and the eks-cluster module refuses to plan a cluster with no administrator.
+    {
+      deployer = {
+        principal_arn = local.deployer_role_arn
+        policies      = [{ policy_arn = local.eks_cluster_admin_policy, scope_type = "cluster" }]
+      }
+    },
+
+    # Humans, via IAM Identity Center. Matched back to the permission set that produced
+    # each role so the map key stays stable across reprovisioning.
+    {
+      for ps in var.sso_admin_permission_sets :
+      "sso-${ps}" => {
+        principal_arn = one([for a in local.sso_admin_arns : a if strcontains(a, "AWSReservedSSO_${ps}_")])
+        policies      = [{ policy_arn = local.eks_cluster_admin_policy, scope_type = "cluster" }]
+      }
+      if length([for a in local.sso_admin_arns : a if strcontains(a, "AWSReservedSSO_${ps}_")]) == 1
+    },
+
+    # Anything named explicitly.
+    {
+      for arn in var.additional_cluster_admin_role_arns :
+      "admin-${reverse(split("/", arn))[0]}" => {
+        principal_arn = arn
+        policies      = [{ policy_arn = local.eks_cluster_admin_policy, scope_type = "cluster" }]
+      }
+    },
+  )
 
   # Boundary exemption, applied to all four roles below.
   #
@@ -203,21 +260,7 @@ module "eks_cluster" {
   # bootstrap_cluster_creator_admin_permissions stays false, the module default, so
   # every administrator is an explicit resource. The entry below is what makes the
   # cluster reachable at all.
-  access_entries = merge(
-    {
-      deployer = {
-        principal_arn = local.deployer_role_arn
-        policies      = [{ policy_arn = local.eks_cluster_admin_policy, scope_type = "cluster" }]
-      }
-    },
-    {
-      for arn in var.additional_cluster_admin_role_arns :
-      "admin-${reverse(split("/", arn))[0]}" => {
-        principal_arn = arn
-        policies      = [{ policy_arn = local.eks_cluster_admin_policy, scope_type = "cluster" }]
-      }
-    },
-  )
+  access_entries = local.cluster_admins
 }
 
 # ── Add-ons, part 1: before the node group ────────────────────────────────────
@@ -368,4 +411,31 @@ module "addon_ebs_csi" {
   }
 
   depends_on = [module.node_group_default]
+}
+
+# ── Did the SSO lookup actually find anything? ────────────────────────────────
+#
+# The map above filters out any permission set that did not resolve to exactly one
+# role. Without this check that filtering is SILENT: you ask for cluster-admin for a
+# permission set, the name is slightly wrong or Identity Center has not provisioned it
+# into this account, and you get a plan that succeeds and access that does not exist.
+#
+# A `check` block rather than a precondition, deliberately. This is a degradation, not a
+# breakage — the deployer still has admin, so the cluster is still manageable and the
+# layer should still apply. A precondition would block the pipeline over a convenience.
+check "sso_admin_permission_sets_resolve" {
+  assert {
+    condition = length([
+      for ps in var.sso_admin_permission_sets : ps
+      if length([for a in local.sso_admin_arns : a if strcontains(a, "AWSReservedSSO_${ps}_")]) != 1
+    ]) == 0
+
+    error_message = join(" ", [
+      "One or more sso_admin_permission_sets did not resolve to exactly one IAM role and",
+      "were skipped, so those humans have NO cluster access.",
+      "Requested: ${join(", ", var.sso_admin_permission_sets)}.",
+      "Found under /aws-reserved/sso.amazonaws.com/: ${length(local.sso_admin_arns) == 0 ? "none" : join(", ", [for a in local.sso_admin_arns : reverse(split("/", a))[0]])}.",
+      "Check the permission set name and that it is provisioned into this account.",
+    ])
+  }
 }
