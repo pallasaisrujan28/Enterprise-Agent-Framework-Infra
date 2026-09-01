@@ -33,10 +33,11 @@ on:
         options:
           - dev
       layer:
-        description: "Which layer to destroy. Destroy in REVERSE order — cluster-addons, then platform. `registry` is deliberately not offered."
+        description: "Which layer to destroy. Destroy in REVERSE order — apps, then cluster-addons, then platform. `registry` is deliberately not offered."
         required: true
         type: choice
         options:
+          - apps
           - cluster-addons
           - platform
       plan_only:

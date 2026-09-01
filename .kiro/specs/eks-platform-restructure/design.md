@@ -2795,6 +2795,38 @@ is also the first real test of the EBS CSI driver that failed repeatedly before.
 the graph holds no data, so the cost is zero — but the same rollback after Step 8
 would lose memory, and the PR should say so.
 
+#### What building it actually found
+
+Three of the upstream chart's **defaults** were wrong for this platform, and one of them was
+dangerous:
+
+**`services.neo4j.spec.type` defaults to `LoadBalancer`.** On EKS that provisions an
+internet-facing NLB in front of the graph database. Two distinct failures: bolt reachable from
+the internet, and a load balancer no Terraform state knows about — ~$19.32/month, whose ENIs
+then fail the VPC destroy with `DependencyViolation`. This is the trap `learnings/007` was
+written about, appearing as a default in the first chart that met it. Overridden to `ClusterIP`.
+
+**The data volume defaults to 100Gi**, about $9.28/month for an empty graph. Set to `10Gi`;
+gp3 expands in place.
+
+**The credential format is easy to get silently wrong.** The chart requires the Secret key to
+be exactly `NEO4J_AUTH` and the value to be `neo4j/<password>` — the pair, not a bare password.
+It then recovers the password with `cut -d '/' -f2`, so a password *containing* a slash is
+truncated with no error: the release installs and authentication fails against a value nothing
+generated. The chart's own validation regex uses a find rather than a full match, so it does
+not catch this. The module generates alphanumeric passwords only.
+
+**Finding 6 is closed structurally rather than by a flag.** Setting `passwordFromSecret`
+alongside `dbms.security.auth_enabled: false` is a hard template failure upstream, so no
+combination of the module's inputs can produce an unauthenticated database.
+
+**A test that proved nothing, found by mutation.** The ClusterIP override was asserted against
+the module's own `inventory` output — a literal in `outputs.tf`. Flipping the chart value to
+`LoadBalancer` failed no test, because the inventory and the chart values were two independent
+strings. They now share one `local`, and `modules/helm-release` exposes `rendered_values` so the
+test asserts on the YAML Helm actually receives. Same class as the `upper()` access-scope bug:
+the test and the code agreed with each other, and neither was connected to reality.
+
 ### Step 6 — `tools`: Firecrawl, all five services.
 
 `modules/firecrawl` in L3: API, Playwright, the PostgreSQL job queue with `pg_cron`
@@ -3364,8 +3396,20 @@ else in the toolchain asserts all three at once.
 | `hashicorp/aws` | `5.100.0` (as declared today) | L1, L2, L3 |
 | `hashicorp/tls` | `4.3.0` | L1 |
 | `hashicorp/random` | `3.9.0` | L1 |
-| `hashicorp/kubernetes` | `2.38.0` | L2, L3 |
-| `hashicorp/helm` | `2.17.0` | L2, L3 |
+| `hashicorp/kubernetes` | **`3.2.1`** — this table was stale | L2, L3 |
+| `hashicorp/helm` | **`3.2.0`** — this table was stale | L3 |
+
+*Corrected 2026-09-01, when L3 was built.* The versions above were carried over from the
+configuration being replaced, on the reasoning that a provider bump in a structural PR makes
+any failure ambiguous. That reasoning held for L1 and L2, and the rebuilt layers then pinned
+`kubernetes` at `~> 3.0` — so the table has said `2.38.0` while the code ran `3.2.1`.
+
+L3 pins `helm` at `~> 3.0` rather than the `2.17.0` listed here, because pinning v2 would put
+two adjacent layers on different provider generations and v2 syntax is not forward compatible.
+The v3 provider moved to the Plugin Framework, turning `set`, `set_sensitive`, `postrender` and
+**the provider's own `kubernetes` block** into typed attributes. The note below about bumping
+helm to v3 "as its own PR after the split" is therefore withdrawn: there is no v2 configuration
+to migrate, so writing v3 from the start avoids a PR whose entire content would be syntax.
 
 Versions are carried over unchanged on purpose. Step 1 is a structural change; a
 provider bump in the same PR would make any failure ambiguous. Bump helm to v3 as
@@ -3379,7 +3423,7 @@ diagnostics become real and get fixed with the schema change they belong to.
 | `langfuse` | `2.0.2` or later | Clean install. Verify every sub-chart image resolves — Bitnami's free versioned tags on Docker Hub are gone (RC4) |
 | `cert-manager` | `v1.16.0` | Returns with Langfuse |
 | `altinity-clickhouse-operator` | pin a version | Currently unpinned in `langfuse.tf`. An unpinned chart is an unpinned dependency |
-| `neo4j` | pin a version | Same |
+| `neo4j` | **`5.26.30`** | Newest patch of the 5.26 LTS line, supported to June 2028, and the floor Graphiti documents. The chart has since moved to calendar versioning (`2026.x`); nothing documents Graphiti against that generation, and re-embedding a graph is expensive |
 
 ### Internal
 
