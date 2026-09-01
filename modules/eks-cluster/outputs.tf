@@ -73,7 +73,7 @@ output "inventory" {
       [
         for k, p in local.access_policies :
         var.access_entries[p.entry_key].principal_arn
-        if endswith(p.policy_arn, "/AmazonEKSClusterAdminPolicy") && p.scope_type == "CLUSTER"
+        if endswith(p.policy_arn, "/AmazonEKSClusterAdminPolicy") && p.scope_type == "cluster"
       ],
     )
 
@@ -85,7 +85,7 @@ output "inventory" {
           for pk, p in local.access_policies : {
             policy_arn = p.policy_arn
             scope      = p.scope_type
-            namespaces = p.scope_type == "NAMESPACE" ? p.namespaces : null
+            namespaces = p.scope_type == "namespace" ? p.namespaces : null
           } if p.entry_key == k
         ]
       }

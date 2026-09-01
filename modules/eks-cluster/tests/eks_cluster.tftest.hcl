@@ -160,17 +160,59 @@ run "access_entry_and_policy_association_are_separate_resources" {
   }
 }
 
-run "cluster_scoped_association_sends_no_namespaces" {
+run "access_scope_type_is_lowercase" {
   command = plan
 
-  # A cluster-scoped association must omit namespaces entirely, not send an empty
-  # list. The API rejects the latter.
+  # THIS TEST EXISTS BECAUSE ITS PREDECESSOR ASSERTED THE OPPOSITE AND PASSED.
+  #
+  # The first version asserted `type == "CLUSTER"`, matching an upper() in the module.
+  # Both agreed with each other and neither agreed with AWS. The apply failed after the
+  # cluster had already been created:
+  #
+  #   InvalidParameterException: accessScope type must be one of [namespace, cluster]
+  #
+  # The provider passes this value through verbatim; it does not normalise case. Pinned
+  # as a literal lowercase string rather than derived from the input, so a future
+  # upper() or title() in the module fails here instead of at apply.
   assert {
-    condition = (
-      one(aws_eks_access_policy_association.this["deployer/AmazonEKSClusterAdminPolicy"].access_scope).type == "CLUSTER" &&
-      one(aws_eks_access_policy_association.this["deployer/AmazonEKSClusterAdminPolicy"].access_scope).namespaces == null
-    )
-    error_message = "a cluster-scoped association must send type CLUSTER and no namespaces."
+    condition     = one(aws_eks_access_policy_association.this["deployer/AmazonEKSClusterAdminPolicy"].access_scope).type == "cluster"
+    error_message = "access_scope.type must be lowercase \"cluster\"; the EKS API rejects \"CLUSTER\"."
+  }
+
+  # A cluster-scoped association must omit namespaces entirely, not send an empty list.
+  assert {
+    condition     = one(aws_eks_access_policy_association.this["deployer/AmazonEKSClusterAdminPolicy"].access_scope).namespaces == null
+    error_message = "a cluster-scoped association must send no namespaces."
+  }
+}
+
+run "mixed_case_input_is_normalised_down" {
+  command = plan
+
+  variables {
+    access_entries = {
+      deployer = {
+        principal_arn = "arn:aws:iam::718438899462:role/eaf-baseline-dev-role"
+        # The variable validation accepts any case, so the module must normalise. A
+        # caller writing "Cluster" should not produce an apply-time API rejection.
+        policies = [{
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          scope_type = "CLUSTER"
+        }]
+      }
+    }
+  }
+
+  assert {
+    condition     = one(aws_eks_access_policy_association.this["deployer/AmazonEKSClusterAdminPolicy"].access_scope).type == "cluster"
+    error_message = "an upper-case scope_type input must be normalised to lowercase before it reaches the API."
+  }
+
+  # And the precondition that looks for a cluster admin must still recognise it, or a
+  # caller writing "CLUSTER" would be told the cluster has no administrator.
+  assert {
+    condition     = length(output.inventory.administrators) == 1
+    error_message = "the cluster-admin check must survive a mixed-case scope_type input."
   }
 }
 

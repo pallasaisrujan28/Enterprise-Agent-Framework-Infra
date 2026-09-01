@@ -42,7 +42,12 @@ locals {
       "${entry_key}/${reverse(split("/", policy.policy_arn))[0]}" => {
         entry_key  = entry_key
         policy_arn = policy.policy_arn
-        scope_type = upper(policy.scope_type)
+        # LOWERCASE. The EKS API rejects "CLUSTER" with
+        #   InvalidParameterException: accessScope type must be one of [namespace, cluster]
+        # and the provider passes this value through verbatim rather than normalising it.
+        # An earlier version used upper() here and failed at apply, after the cluster had
+        # already been created.
+        scope_type = lower(policy.scope_type)
         namespaces = policy.namespaces
       }
     }
@@ -127,7 +132,7 @@ resource "aws_eks_cluster" "this" {
         var.bootstrap_cluster_creator_admin_permissions ||
         length([
           for k, p in local.access_policies :
-          k if endswith(p.policy_arn, "/AmazonEKSClusterAdminPolicy") && p.scope_type == "CLUSTER"
+          k if endswith(p.policy_arn, "/AmazonEKSClusterAdminPolicy") && p.scope_type == "cluster"
         ]) > 0
       )
       error_message = join(" ", [
@@ -181,7 +186,7 @@ resource "aws_eks_access_policy_association" "this" {
     type = each.value.scope_type
 
     # Must be absent, not empty, for a cluster-scoped association.
-    namespaces = each.value.scope_type == "NAMESPACE" ? each.value.namespaces : null
+    namespaces = each.value.scope_type == "namespace" ? each.value.namespaces : null
   }
 
   # The entry has to exist before a policy can be associated with it. for_each over
