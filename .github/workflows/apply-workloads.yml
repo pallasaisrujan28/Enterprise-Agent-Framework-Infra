@@ -47,11 +47,31 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      # Plan reads state and describes AWS; it does not write. A read-only role for the
-      # plan means a compromised plan job cannot change anything.
+      # THIS JOB MUST NOT DECLARE `environment:`, AND MUST NOT USE THE APPLY ROLE.
+      #
+      # The two are the same fact. A GitHub OIDC token's `sub` claim is mutually
+      # exclusive by job context: declaring `environment: dev` REPLACES the
+      # `ref:refs/heads/...` segment with `environment:dev` — it does not add to it.
+      #
+      # So the two roles are reachable from different kinds of job, and neither can be
+      # assumed from the other's:
+      #
+      #   eaf-bootstrap-plan-role   trusts ...:ref:refs/heads/*    -> no environment
+      #   eaf-baseline-dev-role     trusts ...:environment:dev     -> environment: dev
+      #
+      # The first version of this workflow used the apply role here with no
+      # environment, and failed with "Not authorized to perform
+      # sts:AssumeRoleWithWebIdentity" — an error that names neither the subject nor
+      # the trust policy, and reads like a missing repository variable.
+      #
+      # The tempting fix is to add `environment: dev` to this job. Do not: it would
+      # work, and it would hand the plan the deployer's write credentials for no
+      # reason. The plan role is deliberately weaker — ReadOnlyAccess in the
+      # management account, read on the state bucket, and write on nothing but the
+      # lock object.
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workloads-plan-${{ github.run_id }}
 
@@ -139,7 +159,17 @@ jobs:
     if: inputs.plan_only == false && needs.plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
 
-    # The approval gate. Between plan and apply there is a human.
+    # Load-bearing for TWO reasons, and only one of them is the obvious one.
+    #
+    # It shapes the OIDC subject to `...:environment:dev`, which is the only form
+    # eaf-baseline-dev-role's trust policy accepts. Without it this job cannot get
+    # credentials at all.
+    #
+    # It is also where an approval gate would live — but the `dev` environment
+    # currently has no protection rules, so it does not pause anything today. The real
+    # guard for dev is that `plan_only` defaults to true, so changing something takes a
+    # second, deliberate dispatch. Adding required reviewers to the `dev` environment
+    # would turn this into a genuine pause without touching this file.
     environment: ${{ inputs.target }}
 
     # Serialised per layer. Two concurrent applies against one state file is how a
