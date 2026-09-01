@@ -793,12 +793,42 @@ in what the workflow offers. `force_delete` is also `false` here, against the pl
 layer's earlier setting: a destroy that refuses to proceed while images are present is the
 guard working.
 
-**Still open: PersistentVolumeClaims.** Neo4j's data lives in an EBS volume created by a
-PVC, and the `gp3` StorageClass uses `reclaimPolicy: Delete` — so destroying the apps layer
-destroys the data. For scratch data that is correct and cheap. For a knowledge graph built
-up over weeks it is not, and the options are a `Retain` policy (which leaves volumes nothing
-tracks — the reason `make storage-orphans` exists), a snapshot before teardown, or accepting
-the loss. **To be decided when the apps layer is built, not assumed.**
+**PersistentVolumeClaims, and a correction to how this was first framed.** The original note
+here said `reclaimPolicy: Delete` means the data is lost while `Retain` means the volume
+survives as an orphan, and presented that as the decision. That is wrong in a way that
+matters.
+
+`reclaimPolicy` is an instruction to the EBS CSI controller describing what to do **when it
+processes a PVC deletion**. It is not a property of the volume and AWS does not enforce it. If
+the cluster is destroyed while the PVC still exists, no controller remains to process
+anything, and a `Delete` volume leaks exactly like a `Retain` one:
+
+| | PVC deleted while cluster alive | Cluster destroyed with PVC present |
+|---|---|---|
+| `Delete` | volume deleted, data gone | **volume leaks, still billing** |
+| `Retain` | volume kept, orphaned | **volume leaks, still billing** |
+
+The right-hand column is identical. **Teardown order decides whether anything is cleaned up;
+the reclaim policy only decides what happens once the order is already right.**
+
+The same applies to every AWS resource an in-cluster controller creates — a `Service` of type
+`LoadBalancer` produces an ELB, an `Ingress` produces an ALB — and none of them appear in any
+Terraform state. AWS documents both consequences: orphaned resources that
+[block deleting the VPC](https://docs.aws.amazon.com/cli/latest/reference/eks/delete-cluster.html),
+and [requester-managed ENIs](https://docs.aws.amazon.com/vpc/latest/userguide/delete-vpc.html)
+that must go first. A leaked NLB in eu-west-2 is $0.02646/hr, about **$19.32/month**.
+
+**So the fix is a guard on ordering, not a different reclaim policy.**
+`scripts/teardown_guard.py` runs in `destroy-workloads.yml` before anything is touched, and
+refuses a destroy when a layer above still holds resources, or when the live cluster still has
+LoadBalancer Services, Ingresses or bound PVCs. A dry run warns instead of failing, since it
+mutates nothing. `make teardown-check` runs the same sweep after a teardown to confirm nothing
+was left billing. Verified by mutation: four separate defects injected into the guard are each
+caught by its tests. Full reasoning in `learnings/007`.
+
+**Still genuinely open, and much narrower than before:** whether Neo4j's data should be
+*deliberately* preserved across a teardown via a snapshot. Losing it is now a choice rather
+than an accident, so this can wait until the apps layer is built.
 
 ### Why add-ons are their own module, and one per call
 

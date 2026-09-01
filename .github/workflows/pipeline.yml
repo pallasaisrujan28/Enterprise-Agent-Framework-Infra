@@ -82,6 +82,21 @@ jobs:
           pip install --quiet pyyaml
           python3 scripts/validate_register.py accounts/register.yaml
 
+      # The teardown guard decides whether a destroy is allowed to proceed, so its
+      # own tests run here. Enforcement code that is only ever tested on a laptop is
+      # enforcement nobody has checked.
+      #
+      # No AWS credentials needed: every AWS and kubectl call is stubbed, because the
+      # logic under test is the guard's own.
+      #
+      # NOTE, and worth a follow-up: this job does NOT run `make test`, so the 140
+      # terraform module tests have never run in CI. They have passed on every PR so
+      # far only because they were run locally first. Adding them is its own change —
+      # it may surface failures, and those deserve isolated review rather than being
+      # folded into an unrelated PR.
+      - name: scripts
+        run: make test-scripts
+
   # ── plan and deploy: REMOVED with the layer they operated on ───────────────
   #
   # Both jobs targeted workloads/eaf/dev, which has been destroyed (82 resources,
