@@ -67,14 +67,15 @@ output "inventory" {
 
     # Every cluster-admin grant, in one list. The implicit grant is named explicitly
     # when it is in play, because it is otherwise invisible.
+    # Sorted so a reordered input does not look like a change.
     implicit_creator_admin = var.bootstrap_cluster_creator_admin_permissions
     administrators = concat(
       var.bootstrap_cluster_creator_admin_permissions ? ["IMPLICIT: whichever principal created the cluster"] : [],
-      [
+      sort([
         for k, p in local.access_policies :
         var.access_entries[p.entry_key].principal_arn
         if endswith(p.policy_arn, "/AmazonEKSClusterAdminPolicy") && p.scope_type == "cluster"
-      ],
+      ]),
     )
 
     access_entries = {

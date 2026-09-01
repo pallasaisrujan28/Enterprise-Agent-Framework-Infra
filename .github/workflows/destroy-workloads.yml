@@ -21,7 +21,7 @@
 # Two dispatches achieve the same outcome without changing the environment's
 # protection, and give the reviewer the plan output in between.
 name: Destroy workloads
-run-name: "${{ inputs.plan_only && 'DRY RUN' || 'DESTROY' }} ${{ inputs.target }} by @${{ github.actor }}"
+run-name: "${{ inputs.plan_only && 'DRY RUN' || 'DESTROY' }} ${{ inputs.layer }} ${{ inputs.target }} by @${{ github.actor }}"
 
 on:
   workflow_dispatch:
@@ -32,6 +32,12 @@ on:
         type: choice
         options:
           - dev
+      layer:
+        description: "Which layer to destroy. Destroy in REVERSE dependency order — apps, then cluster-addons, then platform."
+        required: true
+        type: choice
+        options:
+          - platform
       plan_only:
         description: "Dry run — show what would be destroyed and stop. Leave checked unless you intend to destroy."
         required: false
@@ -52,35 +58,28 @@ env:
 
 jobs:
   destroy:
-    name: destroy ${{ inputs.target }}
+    name: destroy ${{ inputs.layer }} (${{ inputs.target }})
     runs-on: ubuntu-latest
     environment: dev
     steps:
       - uses: actions/checkout@v4
 
-      # DORMANT until the layers return.
+      # The layers have returned, so the guard that used to stop this workflow is gone.
+      # What replaces it is narrower: check the specific layer exists, because a typo in
+      # a dispatch input should say so rather than fail later inside terraform.
       #
-      # This workflow did its job: run 33394897276 destroyed 82 resources cleanly.
-      # workloads/eaf/dev has since been deleted from the repository, so there is
-      # no directory for it to operate on. It is kept rather than deleted because
-      # the shape is worth preserving — dry run by default, saved plan applied
-      # rather than recomputed, typed confirmation, no suppressed exit codes — and
-      # it gets rewritten per layer at design Step 3.
-      #
-      # This guard turns "confusing failure in a later step" into one clear message.
+      # DESTROY IN REVERSE DEPENDENCY ORDER. platform holds the cluster, so destroying it
+      # while cluster-addons or apps still have state leaves those layers pointing at a
+      # cluster that no longer exists — and their own destroy then cannot run, because
+      # the Kubernetes provider cannot reach an endpoint that is gone.
       - name: check target exists
         run: |
-          DIR="workloads/eaf/${{ inputs.target }}"
+          DIR="workloads/${{ inputs.target }}/${{ inputs.layer }}"
           if [[ ! -d "$DIR" ]]; then
             {
               echo "## Nothing to destroy"
               echo
               echo "\`$DIR\` does not exist in this repository."
-              echo
-              echo "The monolithic dev layer was destroyed on 2026-08-31 (82 resources,"
-              echo "run 33394897276) and removed from the repository. It is being replaced"
-              echo "by three layers — platform, cluster-addons, apps — each of which will"
-              echo "get its own destroy path."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "$DIR does not exist — nothing to destroy" >&2
             exit 1
@@ -141,7 +140,7 @@ jobs:
       # is information you want, not something to paper over silently.
       - name: clear stuck state lock
         if: ${{ !inputs.plan_only }}
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           # S3 native locking (use_lockfile=true) leaves a .tflock object when a
           # runner crashes. Delete it so the next init/destroy can acquire the lock.
@@ -150,7 +149,7 @@ jobs:
           aws s3 rm "s3://${BUCKET}/${KEY}.tflock" --region eu-west-2 || true
 
       - name: init
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: terraform init -input=false -no-color -backend-config=backend.hcl
 
       # ── DRY RUN path ─────────────────────────────────────────────────────────
@@ -163,7 +162,7 @@ jobs:
       # summary says so plainly rather than implying more precision than it has.
       - name: dry run — what is tracked and what would be destroyed
         if: ${{ inputs.plan_only }}
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           set -euo pipefail
           terraform state list > state-list.txt
@@ -175,7 +174,7 @@ jobs:
 
       - name: dry run summary
         if: ${{ inputs.plan_only }}
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           {
             echo "# DRY RUN — nothing was destroyed"
@@ -216,7 +215,7 @@ jobs:
 
       - name: drop k8s and helm resources from state
         if: ${{ !inputs.plan_only }}
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           set -euo pipefail
           # The Kubernetes provider stores null identity for resources created during
@@ -236,7 +235,7 @@ jobs:
       # rather than recomputing at apply time.
       - name: plan the destroy
         if: ${{ !inputs.plan_only }}
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           set -euo pipefail
           terraform plan -destroy -no-color -input=false -lock-timeout=30m \
@@ -246,7 +245,7 @@ jobs:
 
       - name: destroy summary
         if: ${{ !inputs.plan_only }}
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           {
             echo "# DESTROY — ${{ inputs.target }}"
@@ -264,7 +263,7 @@ jobs:
 
       - name: destroy aws resources
         if: ${{ !inputs.plan_only }}
-        working-directory: workloads/eaf/${{ inputs.target }}
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           set -euo pipefail
           # Applies the saved plan, not a freshly computed one.

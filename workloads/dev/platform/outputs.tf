@@ -85,6 +85,31 @@ output "node_group_tolerations" {
 
 # ── IAM ───────────────────────────────────────────────────────────────────────
 
+output "cluster_admins" {
+  description = <<-EOT
+    Every principal holding cluster-admin, and how it got there.
+
+    Surfaced because `authentication_mode = "API"` means this list is the ONLY way to
+    reach the Kubernetes API — there is no `aws-auth` ConfigMap to fall back on. If this
+    is wrong, nothing works, and the symptom is an authorization error from kubectl
+    rather than anything pointing here.
+  EOT
+  value = {
+    for k, e in local.cluster_admins : k => e.principal_arn
+  }
+}
+
+output "kubeconfig_command" {
+  description = <<-EOT
+    The command that writes a kubeconfig entry for this cluster.
+
+    Included because getting it wrong is easy and the failure is opaque: the wrong
+    region or an unknown cluster name produces a config that authenticates fine and then
+    cannot find the cluster.
+  EOT
+  value       = "aws eks update-kubeconfig --name ${module.eks_cluster.name} --region ${var.region}"
+}
+
 output "iam_roles" {
   description = <<-EOT
     Every role this layer owns, as an inventory record.

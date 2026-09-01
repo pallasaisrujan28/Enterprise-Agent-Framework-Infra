@@ -79,17 +79,41 @@ variable "public_access_cidrs" {
 
 variable "additional_cluster_admin_role_arns" {
   description = <<-EOT
-    Extra IAM roles to grant cluster-admin, beyond the deployer.
+    Extra IAM roles to grant cluster-admin, named explicitly.
 
-    Empty by default. Add an SSO role here to use kubectl as a human — but note that
-    AWS documents removing the PATH from a role ARN before using it for cluster
-    access, and an SSO role's ARN contains
-    `/aws-reserved/sso.amazonaws.com/<region>/`. Left out of the first apply rather
-    than guessed at, because a wrong ARN produces an entry that silently never
-    matches. Verify against the live cluster, then add it.
+    For IAM Identity Center roles use `sso_admin_permission_sets` instead — those are
+    discovered, so the random suffix in their name is not written down anywhere.
+
+    A path in the ARN is fine here. AWS documents that an access entry's principal ARN
+    MAY include a path; it is the deprecated `aws-auth` ConfigMap that could not. Worth
+    stating because the two rules are easy to conflate, and the earlier version of this
+    file assumed the stricter one.
   EOT
   type        = list(string)
   default     = []
+}
+
+variable "sso_admin_permission_sets" {
+  description = <<-EOT
+    IAM Identity Center permission set names whose roles get cluster-admin.
+
+    Discovered at plan time rather than named, because the IAM role Identity Center
+    creates for a permission set carries a random suffix — here
+    `AWSReservedSSO_AWSAdministratorAccess_a8fd6486dea1ff46`. That suffix CHANGES if the
+    permission set is reprovisioned or the account is re-enrolled, and AWS is explicit
+    that an access entry stops working when its principal is recreated even at the same
+    ARN, because the underlying role id differs. Hardcoding it would work until it
+    silently did not.
+
+    Names are matched anchored, which matters: this account has both
+    `AdministratorAccess` and `AWSAdministratorAccess`, and a loose pattern would grant
+    cluster-admin to a permission set nobody asked for.
+
+    Set to `[]` to grant no human access — the deployer role alone can then reach the
+    cluster, which is correct for prod and inconvenient for dev.
+  EOT
+  type        = list(string)
+  default     = ["AWSAdministratorAccess"]
 }
 
 # ── Add-on versions ───────────────────────────────────────────────────────────
