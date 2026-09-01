@@ -1,5 +1,6 @@
 SHELL := /bin/bash
-.PHONY: fmt fmt-check lint validate check install-hooks test iam-inventory iam-orphans topology
+.PHONY: fmt fmt-check lint validate check install-hooks test iam-inventory iam-orphans topology \
+        storage-orphans teardown-check test-scripts
 
 # Layers whose state may contain IAM roles. Used by the IAM inventory and orphan
 # checks. ADD NEW LAYERS HERE AS THEY ARE CREATED — a layer missing from this list
@@ -111,9 +112,22 @@ topology:
 storage-orphans:
 	@python3 scripts/iam_inventory.py storage-orphans
 
+# What is still costing money in the region, and what a teardown left behind.
+#
+# Run it AFTER a teardown to confirm nothing leaked: a load balancer, a detached
+# volume or an unassociated elastic IP with nothing tracking it all keep billing.
+# Read-only.
+teardown-check:
+	@python3 scripts/teardown_guard.py --sweep --region $${AWS_REGION:-eu-west-2}
+
+# The guard's own tests. Kept separate from `test`, which is terraform test, because
+# this is python and needs no AWS credentials or provider mocks.
+test-scripts:
+	@python3 scripts/tests/test_teardown_guard.py
+
 # ── Combined (mirrors CI exactly) ─────────────────────────────────────────────
 
-check: fmt-check lint test
+check: fmt-check lint test test-scripts
 
 # ── Git hooks ─────────────────────────────────────────────────────────────────
 

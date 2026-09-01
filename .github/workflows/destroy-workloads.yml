@@ -148,6 +148,60 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: eaf-workload-destroy-${{ github.run_id }}
 
+      # ── THE GUARD ────────────────────────────────────────────────────────────
+      #
+      # Runs before anything is touched, including the lock deletion below.
+      #
+      # WHAT IT CATCHES. Kubernetes creates AWS resources Terraform never sees: a
+      # Service of type LoadBalancer creates an ELB, a PersistentVolumeClaim creates
+      # an EBS volume, an Ingress creates an ALB. They are released by in-cluster
+      # controllers reacting to the Kubernetes object being deleted — so the release
+      # only happens while the cluster is still alive.
+      #
+      # Destroy platform first and the controllers die mid-reconcile. AWS documents
+      # the consequence: "you can have orphaned resources in your VPC that prevent
+      # you from being able to delete the VPC" (EKS DeleteCluster reference). Two
+      # failures follow, and they are opposites — the resource LEAKS and keeps
+      # billing (~$19.32/month for an NLB in eu-west-2), or its ENI holds the subnet
+      # and the destroy STICKS on DependencyViolation.
+      #
+      # The correction this encodes: reclaimPolicy=Delete does NOT protect a volume.
+      # It only tells the CSI controller what to do when it processes a PVC deletion,
+      # and a destroyed cluster has no controller left to process anything. Ordering
+      # is the lever, not the reclaim policy.
+      #
+      # WHY IT ONLY BLOCKS THE REAL RUN. A dry run mutates nothing, so refusing it
+      # would withhold the preview someone dispatched it to see. It warns instead.
+      - name: teardown guard
+        run: |
+          set +e
+          BUCKET=$(grep 'bucket' "workloads/${{ inputs.target }}/${{ inputs.layer }}/backend.hcl" | awk -F'"' '{print $2}')
+          python3 scripts/teardown_guard.py \
+            --layer "${{ inputs.layer }}" \
+            --bucket "$BUCKET" \
+            --prefix "workloads/${{ inputs.target }}" \
+            --region "${{ vars.AWS_REGION }}" \
+            --sweep | tee guard.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          {
+            echo "## Teardown guard"
+            echo
+            echo '```'
+            cat guard.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ $rc -ne 0 ]]; then
+            if [[ "${{ inputs.plan_only }}" == "true" ]]; then
+              echo "::warning::Guard found resources that a real teardown would leak. Dry run continues; the real run would be refused."
+            else
+              echo "::error::Refusing to destroy — see the guard output. Destroy the layers above this one first."
+              exit 1
+            fi
+          fi
+
       # Deleting a lock object is a mutation, so it does not happen in a dry run.
       # If a lock is genuinely stranded, the dry run fails with a lock error — which
       # is information you want, not something to paper over silently.
