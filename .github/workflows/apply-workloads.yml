@@ -14,10 +14,11 @@ on:
         options:
           - dev
       layer:
-        description: "Which layer to apply. Layers are ordered — platform must exist before the ones above it."
+        description: "Which layer to apply. Apply in this order on a rebuild: registry, platform, cluster-addons."
         required: true
         type: choice
         options:
+          - registry
           - platform
           - cluster-addons
       plan_only:

@@ -33,12 +33,12 @@ on:
         options:
           - dev
       layer:
-        description: "Which layer to destroy. Destroy in REVERSE dependency order — apps, then cluster-addons, then platform."
+        description: "Which layer to destroy. Destroy in REVERSE order — cluster-addons, then platform. `registry` is deliberately not offered."
         required: true
         type: choice
         options:
-          - platform
           - cluster-addons
+          - platform
       plan_only:
         description: "Dry run — show what would be destroyed and stop. Leave checked unless you intend to destroy."
         required: false
@@ -48,6 +48,18 @@ on:
         description: 'Type "destroy" to confirm permanent deletion (ignored when plan_only is checked)'
         required: true
         type: string
+
+# `registry` IS DELIBERATELY NOT A CHOICE ABOVE.
+#
+# The operating rhythm is destroy-and-rebuild, and container images are the one thing that
+# should survive it: the agent image is built by a workflow in the APPLICATION repository,
+# so losing it means triggering a second repository's pipeline and waiting, while keeping it
+# costs about $0.10 per GB-month.
+#
+# Leaving it out of this dropdown is the whole enforcement. Terraform cannot express "this
+# layer has a longer lifetime than that one", so the only place the distinction can live is
+# in what this workflow offers. Destroying the registry stays possible and requires someone
+# to mean it.
 
 permissions:
   id-token: write

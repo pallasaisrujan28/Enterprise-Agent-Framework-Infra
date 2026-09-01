@@ -743,7 +743,7 @@ composed, and it reintroduces RC2 one level down.
 | `modules/eks-addon` | L1 | ONE add-on plus its Pod Identity association. Called once per add-on, because add-on ordering relative to the node group cannot be expressed from inside a module |
 | `modules/eks-node-group` | L1 | One managed node group. Called once per pool; taints and labels are inputs, and it **outputs them** so L3 can derive tolerations rather than restating them |
 | `modules/iam-role` | L1, `accounts/*` | **The only** way any role is created. Generated name, mandatory tags, required boundary, typed trust (`github_oidc` / `eks_pod_identity` / `eks_irsa` / `aws_service` / `account_principal`), scoped `PassRole`. See IAM Role Design |
-| `modules/ecr-repository` | L1 | One repository with lifecycle policy, scan-on-push, KMS, immutable tags |
+| `modules/ecr-repository` | **L0 `registry`** | One repository with lifecycle policy, scan-on-push, KMS, immutable tags. Moved out of L1 — see *Layer lifetimes* |
 | `modules/k8s-namespace` | L2 | A namespace plus its baseline: default-deny NetworkPolicy, resource quota if given, labels |
 | `modules/helm-release` | L2, L3 | A thin, opinionated wrapper: `wait` on by default, bounded timeout, `atomic` on, values passed as a typed object |
 | `modules/neo4j` | L3 | Neo4j with authentication, a generated credential in a Secret, PVC sizing, NetworkPolicy |
@@ -753,6 +753,52 @@ composed, and it reintroduces RC2 one level down.
 
 `modules/account-baseline` is the proof the pattern works here — it is already
 consumed by both `accounts/dev` and `accounts/prod` from a single source.
+
+### Layer lifetimes, and why `registry` was split out of `platform`
+
+*Decided 2026-09-01, after the operator confirmed destroy-and-rebuild as the normal rhythm:
+the cluster is torn down whenever it is not in use, because it costs about $0.39/hour to
+leave running.*
+
+That turns "what survives a teardown?" from an afterthought into a design question, and the
+answer is not the same for everything:
+
+| Layer | Lifetime | Why |
+|---|---|---|
+| `accounts/dev` | permanent | Security baseline. Never destroyed |
+| **`workloads/dev/registry`** | **survives teardown** | Container images. Expensive to recreate, nearly free to keep |
+| `workloads/dev/platform` | destroyed when idle | The cluster and network. This is what the money is |
+| `workloads/dev/cluster-addons` | destroyed when idle | Kubernetes objects, recreated in seconds |
+| `workloads/dev/apps` | destroyed when idle | Workloads. **PVCs go with them — see below** |
+
+**Why images specifically.** The agent image is built by a workflow in the *application*
+repository, so losing it means remembering to trigger a second repository's pipeline and
+waiting for it. Keeping it costs roughly $0.10 per GB-month. A layer that is destroyed
+weekly is the wrong home for something with those economics.
+
+The split is about **lifetime, not dependency.** Nothing in `registry` depends on the
+cluster and the cluster does not depend on `registry`. They are simply destroyed on
+different schedules, and Terraform has no way to express that other than a layer boundary.
+
+**The split was free because it happened before any image existed.** All three repositories
+were verified empty at the time. Doing it later would have meant either a cross-layer state
+move or re-pushing every image — which is precisely the class of migration this effort
+exists to avoid, and a good argument for settling lifetime questions before the first
+artefact lands rather than after.
+
+**Enforcement is the absence of a dropdown entry.** `registry` is an option in
+`apply-workloads.yml` and deliberately *not* one in `destroy-workloads.yml`. Terraform
+cannot express "this layer outlives that one", so the only place the distinction can live is
+in what the workflow offers. `force_delete` is also `false` here, against the platform
+layer's earlier setting: a destroy that refuses to proceed while images are present is the
+guard working.
+
+**Still open: PersistentVolumeClaims.** Neo4j's data lives in an EBS volume created by a
+PVC, and the `gp3` StorageClass uses `reclaimPolicy: Delete` — so destroying the apps layer
+destroys the data. For scratch data that is correct and cheap. For a knowledge graph built
+up over weeks it is not, and the options are a `Retain` policy (which leaves volumes nothing
+tracks — the reason `make storage-orphans` exists), a snapshot before teardown, or accepting
+the loss. **To be decided when the apps layer is built, not assumed.**
 
 ### Why add-ons are their own module, and one per call
 
