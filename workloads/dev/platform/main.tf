@@ -289,13 +289,30 @@ module "addon_vpc_cni" {
   # Without it an m6i.large tops out at 29 pods while barely touching 8 GiB of memory
   # — measured, not estimated. With it the ceiling is the Kubernetes-recommended 110.
   configuration_values = jsonencode({
+    # NETWORK POLICY ENFORCEMENT. Off by default, and its absence is invisible.
+    #
+    # Without this, a NetworkPolicy is an object the API server stores and nothing acts
+    # on: `kubectl get networkpolicy` lists it, `describe` shows it selecting every pod,
+    # and traffic flows exactly as before. Verified on this cluster before the flag was
+    # set — the aws-eks-nodeagent container was running with
+    # `--enable-network-policy=false`, so the container's presence proved nothing.
+    #
+    # Enabled here, in L1, because it is a property of the CNI. The default-deny policies
+    # in L2 depend on it, and L2 asserts it rather than assuming it.
+    enableNetworkPolicy = "true"
+
     env = {
       ENABLE_PREFIX_DELEGATION = "true"
 
-      # WARM_PREFIX_TARGET is deliberately NOT set. It allocates a whole spare /28
-      # once a single address from the current prefix is used, which consumes subnet
-      # space for no benefit at this size. AWS advises using it only after
-      # considering the cost.
+      # WARM_PREFIX_TARGET is NOT set here, but it is NOT unset either: read live from
+      # the running DaemonSet, the add-on defaults it to "1".
+      #
+      # An earlier comment in this file claimed it was "deliberately not set", implying
+      # off. That was wrong — omitting an option is not the same as disabling it, and the
+      # only way to know which you got is to read the running object.
+      #
+      # One spare /28 per node is a reasonable default and is left alone. It costs 16
+      # addresses per node against 4091 per subnet.
     }
   })
 

@@ -38,6 +38,7 @@ on:
         type: choice
         options:
           - platform
+          - cluster-addons
       plan_only:
         description: "Dry run — show what would be destroyed and stop. Leave checked unless you intend to destroy."
         required: false
