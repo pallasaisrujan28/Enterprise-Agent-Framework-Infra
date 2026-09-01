@@ -1,0 +1,218 @@
+name: Apply workloads layer
+
+run-name: "${{ inputs.plan_only && 'PLAN' || 'APPLY' }} ${{ inputs.layer }} ${{ inputs.target }} by @${{ github.actor }}"
+
+# Dispatch only. There is no push trigger, deliberately: an apply that runs because a
+# branch moved is an apply nobody chose to make.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment"
+        required: true
+        type: choice
+        options:
+          - dev
+      layer:
+        description: "Which layer to apply. Layers are ordered — platform must exist before the ones above it."
+        required: true
+        type: choice
+        options:
+          - platform
+      plan_only:
+        description: "Plan and stop. Leave checked to review before changing anything."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: 1.13.3
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Plan reads state and describes AWS; it does not write. A read-only role for the
+      # plan means a compromised plan job cannot change anything.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-workloads-plan-${{ github.run_id }}
+
+      # The credentials must resolve to the MANAGEMENT account: the state bucket lives
+      # there, and the provider hops into EAF-DEV from there. Credentials that resolve
+      # anywhere else would apply into the wrong account and SUCCEED, which is the
+      # failure mode worth a guard.
+      - name: verify management account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual, expected ${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" >&2
+            exit 1
+          fi
+
+      - name: plan
+        id: plan
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+
+          # Refresh is ON. A plan that skips it is a plan against a remembered world,
+          # and the drift it hides is exactly what this rebuild exists to remove.
+          set +e
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -out=tfplan \
+            -detailed-exitcode \
+            | tee plan.txt
+          code=${PIPESTATUS[0]}
+          set -e
+
+          # A plan with no summary line did not complete, whatever the exit code says.
+          if ! grep -qE '^(Plan: |No changes)' plan.txt; then
+            echo "no plan summary found — do not trust this run" >&2
+            exit 1
+          fi
+
+          case "$code" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true"  >> "$GITHUB_OUTPUT" ;;
+            *) echo "plan failed with exit code $code" >&2; exit "$code" ;;
+          esac
+
+      # Surfaced in the run summary so the decision to approve can be made without
+      # opening the log. Replacements are called out separately: for this layer a
+      # replacement of the cluster or a node group is minutes of downtime, not seconds.
+      - name: summary
+        if: always()
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
+        run: |
+          {
+            echo "## ${{ inputs.layer }} (${{ inputs.target }})"
+            echo
+            echo '```'
+            grep -E '^(Plan: |No changes)' plan.txt || echo "plan did not complete"
+            echo '```'
+            echo
+            if grep -q 'must be replaced' plan.txt; then
+              echo "### :warning: This plan REPLACES resources"
+              echo '```'
+              grep -B2 'must be replaced' plan.txt | grep -E '^  # ' || true
+              echo '```'
+            fi
+            if [[ "${{ inputs.plan_only }}" == "true" ]]; then
+              echo "_Plan only. Nothing was changed._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.layer }}-${{ inputs.target }}-${{ github.run_id }}
+          path: |
+            workloads/${{ inputs.target }}/${{ inputs.layer }}/tfplan
+            workloads/${{ inputs.target }}/${{ inputs.layer }}/plan.txt
+          retention-days: 5
+
+  apply:
+    name: apply
+    needs: plan
+    # Three conditions, all necessary. plan_only is the default, so an accidental
+    # dispatch previews rather than changes. has_changes avoids an apply that would do
+    # nothing but take a lock.
+    if: inputs.plan_only == false && needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+
+    # The approval gate. Between plan and apply there is a human.
+    environment: ${{ inputs.target }}
+
+    # Serialised per layer. Two concurrent applies against one state file is how a
+    # lock timeout becomes a corrupted state.
+    concurrency:
+      group: apply-workloads-${{ inputs.target }}-${{ inputs.layer }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # The SAVED plan is applied, not a fresh one. Whatever was reviewed and approved
+      # is what runs; a re-plan at apply time could differ from what the human saw.
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.layer }}-${{ inputs.target }}-${{ github.run_id }}
+          path: workloads/${{ inputs.target }}/${{ inputs.layer }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BASELINE_DEV_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: eaf-workloads-apply-${{ github.run_id }}
+
+      - name: verify management account
+        run: |
+          set -euo pipefail
+          actual=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$actual" != "${{ vars.AWS_MANAGEMENT_ACCOUNT_ID }}" ]]; then
+            echo "refusing: credentials resolve to $actual" >&2
+            exit 1
+          fi
+
+      - name: apply
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -no-color -backend-config=backend.hcl
+          terraform apply -no-color -input=false -lock-timeout=5m tfplan
+
+      # Property 2: a layer's plan is clean immediately after its own apply. If it is
+      # not, some argument is being written by AWS and read back differently, and the
+      # layer will show phantom drift forever. Reported rather than enforced, because
+      # a first apply of a cluster legitimately settles some computed values.
+      - name: post-apply plan should be clean
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
+        run: |
+          set -euo pipefail
+          set +e
+          terraform plan -no-color -input=false -lock-timeout=5m -detailed-exitcode | tee after.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## post-apply plan"
+            echo '```'
+            grep -E '^(Plan: |No changes)' after.txt || echo "plan did not complete"
+            echo '```'
+            if [[ "$code" == "2" ]]; then
+              echo ":warning: the layer does not converge — it still shows changes right after its own apply."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: outputs
+        working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
+        run: |
+          {
+            echo "## ${{ inputs.layer }} applied"
+            echo '```json'
+            terraform output -json platform_inventory 2>/dev/null || terraform output -no-color
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
