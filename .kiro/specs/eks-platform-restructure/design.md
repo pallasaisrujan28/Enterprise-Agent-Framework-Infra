@@ -1692,6 +1692,46 @@ job.
 A colon inside a context value is escaped as `%3A`, so an environment named
 `prod:eu` appears as `environment:prod%3Aeu`.
 
+#### Third occurrence: the platform layer's plan job, 2026-09-01
+
+Documented above, encoded in `modules/iam-role`, given a long comment in
+`destroy-workloads.yml` — and it still caught the first dispatch of
+`apply-workloads.yml`. Worth recording, because the recurrence is the point.
+
+The plan job used `AWS_BASELINE_DEV_ROLE_ARN` with no `environment:` declaration. That
+role trusts `...:environment:dev` only, so the token's `...:ref:refs/heads/main` subject
+did not match:
+
+```
+Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+**That message names neither the subject nor the trust policy.** It reads like an unset
+repository variable, which is where the time goes.
+
+**The correct fix is a different role, not a different job.** There are two identities
+and they are reachable from two kinds of job:
+
+| Role | Trusts | Reachable from |
+|---|---|---|
+| `eaf-bootstrap-plan-role` | `...:ref:refs/heads/*` | a job with **no** environment |
+| `eaf-baseline-dev-role` | `...:environment:dev` | a job declaring `environment: dev` |
+
+Adding `environment: dev` to the plan job would also have worked, and would have been
+wrong: it hands a plan the deployer's write credentials for no reason. The plan role is
+deliberately weaker — `ReadOnlyAccess` in the management account, read on the state
+bucket, and write on nothing but the `.tflock` object. `apply-security-baseline.yml`
+already splits the roles this way; `apply-workloads.yml` did not, and that was the
+defect.
+
+The failure was clean: it happened before Terraform ran, so no state was written, no
+lock was taken, and EAF-DEV was verified still empty afterwards.
+
+*Lesson for the next workflow: the role and the `environment:` declaration are one
+decision, not two. Choosing a role means choosing whether the job declares an
+environment, and the two must be decided together or the mismatch is only visible at
+dispatch.*
+
 ### 4. This repository uses immutable subject claims
 
 The live trust policy on `eaf-workload-dev-deployer-role` conditions on:
