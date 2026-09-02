@@ -281,18 +281,46 @@ jobs:
 
       # ── REAL TEARDOWN path ───────────────────────────────────────────────────
 
+      # ONLY FOR THE LAYER THAT REMOVES THE CLUSTER, and that scoping is the whole point.
+      #
+      # This step exists because the Kubernetes provider cannot delete an object through an
+      # API server that no longer exists. When the cluster goes away in the same apply, those
+      # resources have to leave state or the destroy cannot proceed.
+      #
+      # RUNNING IT FOR `apps` OR `cluster-addons` WOULD CAUSE THE LEAK THE GUARD PREVENTS.
+      # Those layers destroy while the cluster is still UP, so Terraform can and must delete
+      # the PVC through the Kubernetes API — which is what makes the EBS CSI controller
+      # release the volume. Dropping it from state instead orphans an EBS volume that bills
+      # with nothing tracking it: exactly Property 17 and learnings/007.
+      #
+      # Found the hard way. Run 33684533395 tried to destroy `apps` and this step failed,
+      # because every address in that layer is module-nested — `module.neo4j.kubernetes_...`
+      # — so a pattern anchored at `^kubernetes_` matched nothing and grep exited 1 under
+      # `set -e`. The failure was correct by accident: had the pattern matched, it would have
+      # orphaned Neo4j's volume. So the pattern is fixed AND the step is scoped, because
+      # fixing only the pattern would have turned a loud failure into a silent leak.
       - name: drop k8s and helm resources from state
-        if: ${{ !inputs.plan_only }}
+        if: ${{ !inputs.plan_only && inputs.layer == 'platform' }}
         working-directory: workloads/${{ inputs.target }}/${{ inputs.layer }}
         run: |
           set -euo pipefail
-          # The Kubernetes provider stores null identity for resources created during
-          # a partial apply. Those null identities block refresh, plan, and destroy.
-          # Removing them from state is safe: Kubernetes resources are deleted
-          # automatically when the EKS cluster is destroyed.
-          terraform state list 2>/dev/null \
-            | grep -E '^(kubernetes_|helm_release\.)' \
-            | xargs -r terraform state rm
+
+          # No `2>/dev/null`: a state list that fails is something to see, not to hide.
+          terraform state list > state-addrs.txt
+
+          # `(^|\.)` so module-nested addresses match too. Anchoring at the start of the
+          # line only ever matched resources declared directly in a root module, which this
+          # repository no longer has.
+          PATTERN='(^|\.)(kubernetes_[a-z0-9_]+|helm_release)\.'
+
+          # An `if` rather than `|| true`, because Property 4 forbids the latter and because
+          # "nothing to drop" is a normal outcome, not an error to suppress.
+          if grep -qE "$PATTERN" state-addrs.txt; then
+            echo "dropping from state so the destroy can proceed without a live API server:"
+            grep -E "$PATTERN" state-addrs.txt | tee /dev/stderr | xargs -n1 terraform state rm
+          else
+            echo "no kubernetes_ or helm_release addresses in state — nothing to drop"
+          fi
 
       # Show what will be removed, and apply exactly that.
       #
