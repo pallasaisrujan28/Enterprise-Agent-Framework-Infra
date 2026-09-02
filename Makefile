@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .PHONY: fmt fmt-check lint validate check install-hooks test iam-inventory iam-orphans topology \
-        storage-orphans teardown-check test-scripts
+        storage-orphans teardown-check test-scripts check-locks
 
 # Layers whose state may contain IAM roles. Used by the IAM inventory and orphan
 # checks. ADD NEW LAYERS HERE AS THEY ARE CREATED — a layer missing from this list
@@ -154,6 +154,11 @@ storage-orphans:
 # Run it AFTER a teardown to confirm nothing leaked: a load balancer, a detached
 # volume or an unassociated elastic IP with nothing tracking it all keep billing.
 # Read-only.
+# Property 8: a committed lock file per root module, covering every declared provider and
+# every platform. Reads files only — no credentials, no network.
+check-locks:
+	@python3 scripts/check_locks.py
+
 teardown-check:
 	@python3 scripts/teardown_guard.py --sweep --region $${AWS_REGION:-eu-west-2}
 
