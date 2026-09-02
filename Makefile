@@ -164,7 +164,7 @@ test-scripts:
 
 # ── Combined (mirrors CI exactly) ─────────────────────────────────────────────
 
-check: fmt-check lint test test-scripts
+check: fmt-check lint test test-scripts check-locks
 
 # ── Git hooks ─────────────────────────────────────────────────────────────────
 
