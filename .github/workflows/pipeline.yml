@@ -18,6 +18,8 @@ concurrency:
 env:
   TF_VERSION: "1.13.3"
   TF_IN_AUTOMATION: "true"
+  # Shared provider cache for the eleven module inits `make test` performs.
+  TF_PLUGIN_CACHE_DIR: /home/runner/.terraform.d/plugin-cache
   ECR_REGISTRY: "718438899462.dkr.ecr.eu-west-2.amazonaws.com"
   DEV_ACCOUNT_ID: "718438899462"
 
@@ -58,11 +60,43 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      # Eleven module directories each run `terraform init`, and without a shared cache
+      # each one downloads the same providers again. The cache turns roughly 200 MB of
+      # repeated downloads into one.
+      #
+      # Keyed on every lock file AND every versions.tf: modules pin floors in versions.tf
+      # rather than committing locks, so a key based on locks alone would go stale the
+      # moment a module's constraint changed.
+      - name: provider cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.terraform.d/plugin-cache
+          key: tf-plugins-${{ env.TF_VERSION }}-${{ hashFiles('**/.terraform.lock.hcl', '**/versions.tf') }}
+          restore-keys: |
+            tf-plugins-${{ env.TF_VERSION }}-
+
       - name: fmt
         run: make fmt-check
 
       - name: validate
         run: make validate
+
+      # THE 169 MODULE TESTS. Until now these ran only on a laptop.
+      #
+      # Every PR up to this point reported "checks pass" without executing a single one of
+      # them — they passed because they were run locally first, which is a convention, not a
+      # guarantee. A test suite that CI does not run is documentation.
+      #
+      # No AWS credentials: every test uses `mock_provider` and `command = plan`, so nothing
+      # is created and nothing is read. That is also why this can live in `checks`, which has
+      # no credentials at all, rather than needing a privileged job.
+      #
+      # `make test` runs every module and fails at the end naming all of them, rather than
+      # aborting on the first. In CI that difference is one round trip per broken module.
+      - name: test
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          make test
 
       - name: yaml
         run: |

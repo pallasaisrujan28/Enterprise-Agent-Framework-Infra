@@ -55,17 +55,31 @@ validate:
 # resources created, a few seconds. This is the fast half of the local loop: the
 # feedback channel that replaces pushing a branch and waiting twenty minutes.
 
+# RUNS EVERY MODULE, THEN FAILS — it does not stop at the first broken one.
+#
+# The previous version relied on `set -e` to abort the loop, so a run with three failing
+# modules reported one. That is tolerable on a laptop, where you re-run in a second, and
+# expensive in CI, where each iteration is a push and a wait. Fail-fast turns one bad commit
+# into three round trips.
+#
+# The exit code is captured explicitly rather than with `|| true`, and a non-empty failure
+# list exits non-zero. Property 4 forbids a step that cannot fail; this aggregates failures,
+# it does not swallow them.
 test:
-	@set -euo pipefail; \
-	found=0; \
+	@set -uo pipefail; \
+	found=0; failed=""; \
 	for dir in $$(find modules -type d -name tests -not -path '*/.terraform/*' | sort); do \
 	  mod=$$(dirname $$dir); \
 	  echo "==> testing $$mod"; \
-	  terraform -chdir=$$mod init -backend=false -input=false -no-color > /dev/null; \
+	  terraform -chdir=$$mod init -backend=false -input=false -no-color > /dev/null || { failed="$$failed $$mod(init)"; continue; }; \
 	  terraform -chdir=$$mod test -no-color; \
+	  if [ $$? -ne 0 ]; then failed="$$failed $$mod"; fi; \
 	  found=1; \
 	done; \
-	if [ "$$found" = "0" ]; then echo "no module tests found"; fi
+	if [ "$$found" = "0" ]; then echo "no module tests found"; fi; \
+	if [ -n "$$failed" ]; then \
+	  echo ""; echo "FAILED modules:$$failed"; exit 1; \
+	fi
 
 # ── IAM inventory and orphan detection ────────────────────────────────────────
 #
