@@ -2827,6 +2827,53 @@ strings. They now share one `local`, and `modules/helm-release` exposes `rendere
 test asserts on the YAML Helm actually receives. Same class as the `upper()` access-scope bug:
 the test and the code agreed with each other, and neither was connected to reality.
 
+#### Applied and verified live, 2026-09-02
+
+Run `33608651555`: `Apply complete! Resources: 4 added, 0 changed, 0 destroyed`, and the
+workflow's own post-apply plan reported `No changes. Your infrastructure matches the
+configuration.` — **Property 2 satisfied**.
+
+| Claim | How it was verified | Result |
+|---|---|---|
+| Pod healthy | `kubectl -n memory get pods` | `neo4j-0` `1/1 Running`, 0 restarts |
+| **Dynamic provisioning works** | `kubectl get pvc` | `data-neo4j-0` **Bound**, 10Gi, `gp3` |
+| Volume is real and encrypted | `aws ec2 describe-volumes` | `vol-0fdc5feb7d945b718`, 10GiB gp3, `in-use`, `Encrypted=True` |
+| `WaitForFirstConsumer` matched zones | volume AZ vs node AZ | both `eu-west-2a` |
+| **No load balancer** | `make teardown-check` | **0** — and all three chart Services are `ClusterIP`, including `neo4j-lb-neo4j` |
+| Nothing leaked | same sweep | 3 volumes, 0 detached; 1 EIP, 0 unassociated |
+| Credential format | read the Secret | 32 alphanumeric chars, exactly one `/` separator |
+
+**The two acceptance tests, which is what "verified" means here.** The design's application-level
+test list asks that "Neo4j accepts an authenticated bolt connection". Both halves were run,
+because the positive alone would not distinguish authentication being *enforced* from
+authentication being *configured*:
+
+```
+cypher-shell -u neo4j -p <correct>   "RETURN 1 AS authenticated;"  ->  1
+cypher-shell -u neo4j -p <wrong>     "RETURN 1;"
+    ->  The client is unauthorized due to authentication failure.
+```
+
+**Finding 6 is therefore closed with evidence rather than assertion.**
+
+The same two-sided check was applied to the NetworkPolicy, for the reason recorded throughout
+this document: a policy with no enforcer is stored, listed, described as selecting every pod,
+and ignored. Presence proves nothing.
+
+```
+busybox in `memory` (allowed)  ->  neo4j.memory.svc.cluster.local:7687 open
+busybox in `tools`   (denied)  ->  timed out, pod terminated (Error)
+```
+
+So the allow policy admits what it names and the namespace's default-deny blocks what it does
+not — both confirmed by observation, not by reading YAML.
+
+**What this closes about the EBS CSI driver.** This was the first workload in the rebuilt
+platform to provision a volume, and the add-on that provisions it is the one that timed out at
+20 minutes in run `33320638814` and was the immediate cause of the original teardown. It bound
+in under 70 seconds, and `wait = true` with `atomic = true` means Helm observed readiness rather
+than the apply merely not failing.
+
 ### Step 6 — `tools`: Firecrawl, all five services.
 
 `modules/firecrawl` in L3: API, Playwright, the PostgreSQL job queue with `pg_cron`
