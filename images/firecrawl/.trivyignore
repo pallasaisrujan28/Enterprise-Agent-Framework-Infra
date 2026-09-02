@@ -31,3 +31,25 @@ CVE-2026-69152
 CVE-2026-69192
 CVE-2026-73566
 CVE-2026-9496
+
+# ── GHSA-72r4-9c5j-mj57 — pnpm 11.4.0, fixed in 10.34.4 / 11.7.0 ──────────────
+#
+# "pnpm: `patch-remove` could delete project-selected files"
+#
+# WHY SUPPRESSED RATHER THAN PATCHED. pnpm is a BUILD tool baked into the upstream
+# Firecrawl image. Our Dockerfile applies Debian security patches with apt-get, which
+# cannot touch an npm-managed package — so this is not fixable from our layer. It needs
+# upstream to bump pnpm and republish.
+#
+# WHY THE RISK IS ACCEPTED. The advisory is about `pnpm patch-remove` deleting files in
+# the project directory it is run against. Nothing in the running container invokes pnpm:
+# the images run `node dist/...` entrypoints against an already-installed tree. It is a
+# developer-workstation concern reaching us only because the tool ships in the image.
+#
+# NOT A BLANKET SUPPRESSION. This is one advisory id. The gate stays at CRITICAL,HIGH with
+# ignore-unfixed, so any other fixable HIGH still fails the build.
+#
+# REVIEW: remove this entry once the upstream image ships pnpm >= 11.7.0. `make
+# image-digests` reports when the base has moved, which is the trigger to re-check.
+# Suppressed 2026-09-02, on the operator ruling to accept and proceed.
+GHSA-72r4-9c5j-mj57
