@@ -55,17 +55,54 @@ validate:
 # resources created, a few seconds. This is the fast half of the local loop: the
 # feedback channel that replaces pushing a branch and waiting twenty minutes.
 
+# RUNS EVERY MODULE, THEN FAILS — it does not stop at the first broken one.
+#
+# The previous version relied on `set -e` to abort the loop, so a run with three failing
+# modules reported one. That is tolerable on a laptop, where you re-run in a second, and
+# expensive in CI, where each iteration is a push and a wait. Fail-fast turns one bad commit
+# into three round trips.
+#
+# The exit code is captured explicitly rather than with `|| true`, and a non-empty failure
+# list exits non-zero. Property 4 forbids a step that cannot fail; this aggregates failures,
+# it does not swallow them.
+# THE CREDENTIAL CHAIN IS SEVERED, so a local run and a CI run see the same thing.
+#
+# These tests are supposed to be offline. Proving that by unsetting AWS_* environment
+# variables is not enough: the credential chain continues to ~/.aws/credentials, which
+# exists on a laptop and does not exist on a runner. modules/iam-role passed here for weeks
+# on a developer's local profile and failed the moment CI ran it — 0 passed, 26 skipped,
+# "No valid credential sources found".
+#
+# So the environment is emptied AND the shared config and credentials files are pointed at
+# /dev/null, and HOME is moved aside so nothing is discovered under it. AWS_EC2_METADATA_
+# DISABLED closes the last path, the instance metadata endpoint, which is reachable on an
+# EC2 runner and would otherwise be another way for local and CI to disagree.
+#
+# If a test needs credentials, it is not a unit test, and this makes that a failure rather
+# than a difference of laptop.
+TEST_ENV := env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+              -u AWS_PROFILE -u AWS_REGION -u AWS_DEFAULT_REGION \
+              HOME=/tmp/eaf-test-nohome \
+              AWS_CONFIG_FILE=/dev/null \
+              AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+              AWS_EC2_METADATA_DISABLED=true
+
 test:
-	@set -euo pipefail; \
-	found=0; \
+	@mkdir -p /tmp/eaf-test-nohome; \
+	set -uo pipefail; \
+	found=0; failed=""; \
 	for dir in $$(find modules -type d -name tests -not -path '*/.terraform/*' | sort); do \
 	  mod=$$(dirname $$dir); \
 	  echo "==> testing $$mod"; \
-	  terraform -chdir=$$mod init -backend=false -input=false -no-color > /dev/null; \
-	  terraform -chdir=$$mod test -no-color; \
+	  $(TEST_ENV) terraform -chdir=$$mod init -backend=false -input=false -no-color > /dev/null || { failed="$$failed $$mod(init)"; continue; }; \
+	  $(TEST_ENV) terraform -chdir=$$mod test -no-color; \
+	  if [ $$? -ne 0 ]; then failed="$$failed $$mod"; fi; \
 	  found=1; \
 	done; \
-	if [ "$$found" = "0" ]; then echo "no module tests found"; fi
+	if [ "$$found" = "0" ]; then echo "no module tests found"; fi; \
+	if [ -n "$$failed" ]; then \
+	  echo ""; echo "FAILED modules:$$failed"; exit 1; \
+	fi
 
 # ── IAM inventory and orphan detection ────────────────────────────────────────
 #
