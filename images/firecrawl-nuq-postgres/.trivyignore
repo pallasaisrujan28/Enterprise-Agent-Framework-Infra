@@ -1,22 +1,9 @@
-# CVEs in Firecrawl Playwright's npm dependencies that cannot be patched from
-# a Dockerfile layer. Remove entries when upstream ships fixed package versions.
-# All are DoS-class; risk accepted for dev. Re-evaluate before prod.
-
-CVE-2026-12151
-CVE-2026-13149
-CVE-2026-14257
-CVE-2026-33671
-CVE-2026-48815
-CVE-2026-55487
-CVE-2026-55697
-CVE-2026-55698
-CVE-2026-55700
-CVE-2026-59873
-CVE-2026-59874
-CVE-2026-69152
-CVE-2026-69192
-CVE-2026-73566
-CVE-2026-9496
+# Suppressions for the Firecrawl queue-database image.
+#
+# Deliberately NOT a copy of images/firecrawl/.trivyignore. Those entries were accepted
+# against findings in the API image's dependency tree; inheriting them here would suppress
+# findings this image has never been scanned for. One entry, for the one advisory that
+# actually blocked its build.
 
 # ── GHSA-72r4-9c5j-mj57 — pnpm 11.4.0, fixed in 10.34.4 / 11.7.0 ──────────────
 #
