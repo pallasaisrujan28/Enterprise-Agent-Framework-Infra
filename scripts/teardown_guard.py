@@ -368,6 +368,35 @@ def sweep(region: str) -> list[str]:
                 "--output", "json"], lambda d: len(d["Snapshots"])),
          "$0.05/GB-mo")
 
+    # CLOUDWATCH LOG GROUPS — A CATEGORY THIS SWEEP ORIGINALLY MISSED.
+    #
+    # Found by reading a bill rather than by writing a check, which is the wrong order.
+    # EKS creates /aws/eks/<cluster>/cluster on the control plane's first write whenever log
+    # types are enabled. Nothing declares it, so it has no retention, appears in no plan, and
+    # is not removed by deleting the cluster. Measured on this account: 931.8 MB at NEVER
+    # EXPIRES, and $2.98 of ingestion in one month at roughly $0.60/GB.
+    #
+    # It is the same shape as the orphaned volume and the chart-created load balancer: an AWS
+    # resource brought into existence as a side effect, owned by nothing. The difference is
+    # that this one is cheap enough per day to never draw attention, which is what let it run
+    # past a teardown unnoticed.
+    #
+    # A group with a retention policy is fine and is not flagged. A group that never expires
+    # is, because that is unbounded growth rather than a bounded cost.
+    groups = probe(["aws", "logs", "describe-log-groups", "--region", region, "--output", "json"],
+                   lambda d: d["logGroups"])
+    if isinstance(groups, Unknown):
+        line("CloudWatch log groups", groups)
+    else:
+        forever = [g for g in groups if g.get("retentionInDays") is None]
+        gb = sum(g.get("storedBytes", 0) for g in forever) / 1e9
+        extra = (f"  <-- {len(forever)} NEVER EXPIRE, {gb:.2f} GB growing"
+                 if forever else "")
+        print(f"  {'CloudWatch log groups':<21} {len(groups):>4}   "
+              f"of which never expire: {len(forever)}{extra}")
+        for g in forever:
+            print(f"    {g['logGroupName']}  {g.get('storedBytes', 0) / 1e6:.1f} MB")
+
     if unknowns:
         print()
         print(f"  !! {len(unknowns)} of these could not be checked, so this is NOT an all-clear.")

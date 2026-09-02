@@ -394,3 +394,118 @@ run "reject_bad_org_prefix" {
 
   expect_failures = [var.org_prefix]
 }
+
+# ── The log group, and the leak that existed before it ────────────────────────
+#
+# Enabling log types without owning the group is not "no log group". EKS creates one at a
+# fixed path with no retention, absent from state, and every teardown leaves it behind.
+# Measured on this account at 931.8 MB and NEVER EXPIRES before this was added.
+
+run "the_log_group_is_owned_and_bounded" {
+  command = plan
+
+  variables {
+    enabled_cluster_log_types = ["api", "audit", "authenticator"]
+    log_retention_days        = 30
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_log_group.cluster) == 1
+    error_message = "the log group must be created. Left to EKS it has no retention and no state, so nothing bounds it and no destroy removes it."
+  }
+
+  assert {
+    condition     = one(aws_cloudwatch_log_group.cluster).retention_in_days == 30
+    error_message = "retention must be set. The absent-field default is keep-forever."
+  }
+
+  # EKS writes to this exact path and cannot be told otherwise, so a different name here
+  # would leave the real group unmanaged while creating an empty one alongside it.
+  assert {
+    condition     = one(aws_cloudwatch_log_group.cluster).name == "/aws/eks/eaf-dev/cluster"
+    error_message = "the name must be /aws/eks/<cluster>/cluster, which is where EKS publishes."
+  }
+
+  assert {
+    condition     = output.inventory.logs_kept_forever == false
+    error_message = "the inventory must report that logs are bounded."
+  }
+}
+
+run "no_log_group_when_no_log_types_are_enabled" {
+  command = plan
+
+  variables {
+    enabled_cluster_log_types = []
+  }
+
+  # Nothing writes, so a group would be an empty resource that still has to be destroyed.
+  assert {
+    condition     = length(aws_cloudwatch_log_group.cluster) == 0
+    error_message = "with no log types there is nothing to store, so no group should exist."
+  }
+
+  assert {
+    condition     = output.inventory.logs_kept_forever == false
+    error_message = "no logs at all cannot be logs kept forever."
+  }
+}
+
+run "keeping_logs_forever_has_to_be_asked_for" {
+  command = plan
+
+  variables {
+    enabled_cluster_log_types = ["api"]
+    log_retention_days        = null
+  }
+
+  # null is permitted, because some environments genuinely need indefinite retention. What
+  # this module removes is arriving there by omission.
+  assert {
+    condition     = one(aws_cloudwatch_log_group.cluster).retention_in_days == null
+    error_message = "a null retention must reach the provider as null, which is how CloudWatch expresses keep-forever."
+  }
+
+  assert {
+    condition     = output.inventory.logs_kept_forever == true
+    error_message = "the inventory must say so plainly when logs never expire. That is the state that produced the leak."
+  }
+}
+
+run "declining_to_manage_the_group_is_reported_as_unbounded" {
+  command = plan
+
+  variables {
+    enabled_cluster_log_types = ["api", "audit"]
+    manage_log_group          = false
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_log_group.cluster) == 0
+    error_message = "no group is created when the caller declines to manage it."
+  }
+
+  # The honest consequence: EKS will create it, with no retention, owned by nothing.
+  assert {
+    condition     = output.inventory.logs_kept_forever == true
+    error_message = "logs are published but nothing bounds them, and the inventory must not describe that as managed."
+  }
+
+  assert {
+    condition     = output.inventory.log_group_managed_here == false
+    error_message = "the inventory must not claim ownership of a group this module did not create."
+  }
+}
+
+run "reject_a_retention_cloudwatch_does_not_accept" {
+  command = plan
+
+  variables {
+    enabled_cluster_log_types = ["api"]
+    log_retention_days        = 45
+  }
+
+  # CloudWatch Logs takes an enumerated set, not any integer. 45 applies cleanly in a plan
+  # and is rejected at apply time, which is the wrong place to find out.
+  expect_failures = [var.log_retention_days]
+}

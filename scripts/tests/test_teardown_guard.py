@@ -306,6 +306,7 @@ ALL_EMPTY = [
     (["describe-volumes"], (0, json.dumps({"Volumes": []}))),
     (["describe-addresses"], (0, json.dumps({"Addresses": []}))),
     (["describe-snapshots"], (0, json.dumps({"Snapshots": []}))),
+    (["describe-log-groups"], (0, json.dumps({"logGroups": []}))),
 ]
 g.sh = fake_sh(ALL_EMPTY)
 check("a genuinely empty region reports no unknowns", g.sweep("eu-west-2"), [])
@@ -317,6 +318,30 @@ check("one failed probe among successes is still reported", len(g.sweep("eu-west
 # Half of the load-balancer answer failing makes the total unknown, never a partial count.
 g.sh = fake_sh([(["elb", "describe-load-balancers"], EXPIRED)] + ALL_EMPTY)
 check("a partial load-balancer answer is not presented as a total", len(g.sweep("eu-west-2")), 1)
+
+# ───────── log groups: the category this sweep missed until a bill showed it ─────────
+print("\nlog groups — EKS creates one nothing declares, and a teardown leaves it")
+
+# A group with retention is a bounded cost and must not be flagged.
+g.sh = fake_sh([(["describe-log-groups"],
+                 (0, json.dumps({"logGroups": [
+                     {"logGroupName": "/aws/eks/x/cluster", "storedBytes": 1_000_000,
+                      "retentionInDays": 30}]})))] + ALL_EMPTY)
+check("a group WITH retention is not reported as a leak", g.sweep("eu-west-2"), [])
+
+# The real case: no retentionInDays key at all means keep forever.
+g.sh = fake_sh([(["describe-log-groups"],
+                 (0, json.dumps({"logGroups": [
+                     {"logGroupName": "/aws/eks/eaf-dev/cluster", "storedBytes": 931_800_000}]})))]
+               + ALL_EMPTY)
+out = g.sweep("eu-west-2")
+check("a never-expiring group is still not an 'unknown'", out, [])
+
+# And it must be probed at all — a missing stub proves the call is made.
+g.sh = fake_sh([(["describe-log-groups"], EXPIRED)] + ALL_EMPTY)
+check("a failed log-group probe is reported, not skipped", len(g.sweep("eu-west-2")), 1)
+check("  and names the log group probe",
+      any("log group" in u.lower() for u in g.sweep("eu-west-2")), True)
 
 print(f"\n  {PASSED} passed, {FAILED} failed")
 sys.exit(1 if FAILED else 0)
