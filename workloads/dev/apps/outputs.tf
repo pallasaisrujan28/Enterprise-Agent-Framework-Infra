@@ -36,6 +36,10 @@ output "apps_inventory" {
 
     neo4j = module.neo4j.inventory
 
+    # Null until an image tag is supplied — Property 6 means there is nothing to deploy until
+    # build-images has pushed.
+    firecrawl = one(module.firecrawl[*].inventory)
+
     # What this layer relies on other layers for. Recorded because a value read from another
     # layer's state is a dependency, and an undocumented dependency is how apply order
     # becomes folklore.
