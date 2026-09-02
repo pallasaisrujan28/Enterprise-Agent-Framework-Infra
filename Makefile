@@ -10,7 +10,7 @@ SHELL := /bin/bash
 # workloads/eaf/dev/{platform,cluster-addons,apps} are appended at design Steps 3
 # and 4, when those directories exist. They are not listed pre-emptively because
 # the check treats a missing directory as an error, not as an empty layer.
-IAM_LAYERS := accounts/dev accounts/prod workloads/dev/registry workloads/dev/platform workloads/dev/cluster-addons
+IAM_LAYERS := accounts/dev accounts/prod workloads/dev/registry workloads/dev/platform workloads/dev/cluster-addons workloads/dev/apps
 
 # ── Formatting ─────────────────────────────────────────────────────────────────
 

@@ -14,13 +14,14 @@ on:
         options:
           - dev
       layer:
-        description: "Which layer to apply. Apply in this order on a rebuild: registry, platform, cluster-addons."
+        description: "Which layer to apply. Apply in this order on a rebuild: registry, platform, cluster-addons, apps."
         required: true
         type: choice
         options:
           - registry
           - platform
           - cluster-addons
+          - apps
       plan_only:
         description: "Plan and stop. Leave checked to review before changing anything."
         required: false
@@ -245,6 +246,6 @@ jobs:
           {
             echo "## ${{ inputs.layer }} applied"
             echo '```json'
-            terraform output -json platform_inventory 2>/dev/null || terraform output -no-color
+            terraform output -json ${{ inputs.layer == 'platform' && 'platform_inventory' || inputs.layer == 'apps' && 'apps_inventory' || 'cluster_addons_inventory' }} 2>/dev/null || terraform output -no-color
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
