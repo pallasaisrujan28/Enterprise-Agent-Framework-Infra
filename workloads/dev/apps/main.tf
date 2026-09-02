@@ -72,3 +72,40 @@ module "neo4j" {
     "eaf.io/layer" = "apps"
   }
 }
+
+# ── Firecrawl ─────────────────────────────────────────────────────────────────
+#
+# COUNT-GATED ON THE IMAGE TAG, which is Property 6 made structural: with no tag there is no
+# deployment, so the layer cannot reference an image that has not been pushed.
+#
+# Sized to fit rather than to upstream's defaults. Their Helm chart asks for roughly 10,250m
+# CPU and ~26.5 GB — against two m6i.large offering about 3,860m and 14.3 GiB with Neo4j
+# already resident. `modules/firecrawl` defaults to about 1,450m and 5,184Mi, and enforces that
+# with a plan-time budget check rather than trusting the arithmetic in a comment.
+#
+# The reduction is mostly one number: nuq-worker ships at FIVE replicas requesting 1000m and
+# 3G each. Replicas are the right dial to turn when something is actually crawling.
+module "firecrawl" {
+  source = "../../../modules/firecrawl"
+  count  = var.firecrawl_image_tag == null ? 0 : 1
+
+  name      = "firecrawl"
+  namespace = var.firecrawl_namespace
+
+  registry  = local.ecr_registry
+  image_tag = var.firecrawl_image_tag
+
+  # Read from the layer that created it, not restated.
+  storage_class_name = local.storage_class_name
+
+  # Empty until something consumes the API. It is unauthenticated, so this list is the only
+  # access control in front of it.
+  allowed_client_namespaces = var.firecrawl_client_namespaces
+
+  # The TOOLS namespace's enforcement state, not the memory namespace's.
+  network_policy_enforced = local.firecrawl_policy_enforced
+
+  labels = {
+    "eaf.io/layer" = "apps"
+  }
+}
