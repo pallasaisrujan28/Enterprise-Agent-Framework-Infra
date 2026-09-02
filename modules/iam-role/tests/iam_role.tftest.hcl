@@ -8,25 +8,44 @@
 # Half of these tests assert that BAD input is rejected. A guardrail nobody has
 # seen fail is not known to work.
 
-# No credentials, deliberately and verifiably.
+# No credentials, and this time the claim is testable.
 #
-# The three skip_* flags stop the provider trying to validate credentials, look up
-# the account id, or reach the EC2 instance metadata endpoint during
-# initialisation. With those off, a plan of resources whose values are all known
-# from configuration needs no AWS access at all.
+# Unsetting AWS_* environment variables is NOT sufficient evidence of that, which is what
+# the previous version of this comment asserted. The AWS credential chain continues on to
+# ~/.aws/credentials, so a suite that reads "passes with the environment unset" can still be
+# quietly using a developer's local profile — and then fail on a runner that has none.
 #
-# Verified: this suite passes with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-# AWS_SESSION_TOKEN, AWS_PROFILE and AWS_DEFAULT_REGION all unset.
+# The check that actually holds it:
+#
+#   HOME=/tmp/nohome AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+#     terraform -chdir=modules/iam-role test
+#
+# `make test` now sets exactly that, so a local run and a CI run see the same absence of
+# credentials rather than differing by the contents of a home directory.
 #
 # An earlier revision set access_key = "mock" / secret_key = "mock" here. They were
 # unnecessary, and a committed file containing something shaped like a credential is
 # noise for a reviewer and for secret scanning. Removed.
-provider "aws" {
-  region                      = "eu-west-2"
-  skip_credentials_validation = true
-  skip_requesting_account_id  = true
-  skip_metadata_api_check     = true
-}
+# mock_provider, matching every other module in this repository.
+#
+# THE PREVIOUS VERSION WAS A REAL `provider "aws"` BLOCK WITH THREE skip_* FLAGS, AND IT
+# NEEDED CREDENTIALS.
+#
+# The flags stop the provider validating credentials, looking up the account id, and
+# reaching the instance metadata endpoint. What they do not do is remove the need for a
+# credential source to exist: the provider still resolves the default chain when it
+# configures, and with nothing to find it fails with "No valid credential sources found"
+# before a single run block executes. 0 passed, 26 skipped.
+#
+# It appeared to work because the default chain reaches ~/.aws/credentials, which exists on
+# a developer laptop and does not exist on a CI runner. The file's own header claimed this
+# suite was "verified" with the AWS_* environment variables unset — and that verification
+# was invalid, because unsetting environment variables does not disable the shared
+# credentials file. The claim was stronger than the evidence behind it.
+#
+# mock_provider needs no credential source at all, which is why the other five aws-using
+# modules already use it.
+mock_provider "aws" {}
 
 variables {
   org_prefix   = "eaf"
