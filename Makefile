@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 .PHONY: fmt fmt-check lint validate check install-hooks test iam-inventory iam-orphans topology \
-        storage-orphans teardown-check test-scripts
+        storage-orphans teardown-check test-scripts image-digests
 
 # Layers whose state may contain IAM roles. Used by the IAM inventory and orphan
 # checks. ADD NEW LAYERS HERE AS THEY ARE CREATED — a layer missing from this list
@@ -154,6 +154,14 @@ storage-orphans:
 # Run it AFTER a teardown to confirm nothing leaked: a load balancer, a detached
 # volume or an unassociated elastic IP with nothing tracking it all keep billing.
 # Read-only.
+# Are the base images in images/*/Dockerfile still current?
+#
+# Digest pinning trades one failure for another: a `:latest` base rots by changing under you,
+# a digest base rots by NOT changing while upstream ships security patches. The second is
+# invisible without asking, which is what this does. Read-only, no credentials.
+image-digests:
+	@python3 scripts/image_digests.py
+
 teardown-check:
 	@python3 scripts/teardown_guard.py --sweep --region $${AWS_REGION:-eu-west-2}
 

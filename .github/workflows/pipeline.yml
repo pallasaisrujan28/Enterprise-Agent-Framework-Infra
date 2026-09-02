@@ -226,6 +226,12 @@ jobs:
             context: images/firecrawl
           - name: tools/firecrawl-playwright
             context: images/firecrawl-playwright
+          # The queue's Postgres. NOT interchangeable with the official postgres image:
+          # upstream builds it with the schema and extensions the queue needs, and the API
+          # reaches it by the hostname `nuq-postgres`. Stock postgres accepts the connection
+          # and then fails at query time.
+          - name: tools/firecrawl-nuq-postgres
+            context: images/firecrawl-nuq-postgres
 
     steps:
       - uses: actions/checkout@v4
