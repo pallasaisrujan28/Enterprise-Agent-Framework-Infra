@@ -268,3 +268,46 @@ variable "extra_tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "manage_log_group" {
+  description = <<-EOT
+    Create and own the CloudWatch log group the control plane writes to.
+
+    ON by default, because the alternative is not "no log group" — it is a log group created
+    by EKS with no retention policy, absent from Terraform state, and left behind by every
+    teardown. Measured here at 931.8 MB and `NEVER EXPIRES` before this was added.
+
+    Set to false only when something else already owns the group, and be aware that a group
+    left to EKS grows without bound.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "log_retention_days" {
+  description = <<-EOT
+    How long control-plane logs are kept.
+
+    30 days by default. The value is a cost decision as much as a policy one: `audit` is by
+    far the highest-volume type, and ingestion in eu-west-2 runs about $0.60/GB with storage
+    on top for as long as the logs live.
+
+    `null` means keep forever. That is the behaviour this variable exists to prevent, so it
+    has to be asked for explicitly rather than arrived at by omission.
+  EOT
+  type        = number
+  default     = 30
+  validation {
+    condition = var.log_retention_days == null || contains(
+      [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653],
+      var.log_retention_days
+    )
+    error_message = "log_retention_days must be null or one of the values CloudWatch Logs accepts: 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653."
+  }
+}
+
+variable "log_kms_key_arn" {
+  description = "CMK for the log group. Null uses the CloudWatch Logs service key, which is adequate and has no key policy to maintain."
+  type        = string
+  default     = null
+}

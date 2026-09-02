@@ -65,6 +65,21 @@ output "inventory" {
     secrets_encrypted_with_kms = var.secrets_kms_key_arn != null
     enabled_log_types          = var.enabled_cluster_log_types
 
+    # The two properties that decide whether logging is a bounded cost or an unbounded one.
+    # A log group EKS created for itself has neither, and appears in no plan.
+    log_group_managed_here = var.manage_log_group && length(var.enabled_cluster_log_types) > 0
+    log_group_name         = try(one(aws_cloudwatch_log_group.cluster).name, null)
+    log_retention_days     = var.manage_log_group ? var.log_retention_days : null
+
+    # Deliberately explicit. `null` retention means logs are kept forever, which is the
+    # default when nobody owns the group, and is worth seeing in an inventory rather than
+    # inferring from an absent field.
+    logs_kept_forever = (
+      var.manage_log_group && length(var.enabled_cluster_log_types) > 0
+      ? var.log_retention_days == null
+      : length(var.enabled_cluster_log_types) > 0
+    )
+
     # Every cluster-admin grant, in one list. The implicit grant is named explicitly
     # when it is in play, because it is otherwise invisible.
     # Sorted so a reordered input does not look like a change.

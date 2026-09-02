@@ -151,6 +151,17 @@ resource "aws_eks_cluster" "this" {
       error_message = "service_ipv4_cidr must be a valid CIDR block. It cannot be changed after the cluster is created."
     }
   }
+
+  # The log group must exist BEFORE the control plane first writes to it.
+  #
+  # Without this edge Terraform is free to create the cluster first, EKS creates the group
+  # itself with no retention, and the next apply fails with ResourceAlreadyExistsException
+  # against a group this module is supposed to own. The dependency is on ordering only —
+  # no attribute of the group is referenced, which is exactly what depends_on is for.
+  #
+  # On destroy the edge reverses, so the cluster goes before the group. That is also what we
+  # want: the group is deleted rather than left behind, which is the leak this closes.
+  depends_on = [aws_cloudwatch_log_group.cluster]
 }
 
 # ── Access entries: who may talk to the Kubernetes API ────────────────────────
@@ -192,4 +203,42 @@ resource "aws_eks_access_policy_association" "this" {
   # The entry has to exist before a policy can be associated with it. for_each over
   # a different map means Terraform cannot infer this from the references alone.
   depends_on = [aws_eks_access_entry.this]
+}
+
+# ── The log group the control plane writes to ─────────────────────────────────
+#
+# WHY THIS RESOURCE EXISTS: without it, enabling log types creates a cost leak that
+# nothing in Terraform can see, and that a teardown does not clean up.
+#
+# `enabled_cluster_log_types` tells EKS to publish control-plane logs. It does not create
+# anywhere to put them — EKS does that itself, on first write, at the fixed name
+# `/aws/eks/<cluster>/cluster`. A log group created that way has:
+#
+#   no retention policy   -> it never expires and grows without bound
+#   no Terraform state    -> no plan mentions it and no destroy removes it
+#
+# Measured on this account: $2.98 of ingestion in August for 5 GB at ~$0.60/GB, and the
+# group had reached 931.8 MB at `retentionInDays: NEVER EXPIRES`. It also survived the
+# 2026-08-31 teardown, because deleting a cluster does not delete a log group nobody
+# declared. That is the same shape as the orphaned volume in Property 17 and the
+# chart-created load balancer in learnings/007: an AWS resource brought into existence as a
+# side effect of configuration, owned by nothing.
+#
+# Creating it here fixes both halves at once. Retention becomes a declared value, and
+# `terraform destroy` removes the group — so the leak closes rather than being documented.
+#
+# THE ORDERING IS LOAD-BEARING. The cluster depends on this group, so the group exists
+# before the control plane first writes. Reverse the order and EKS creates the group itself,
+# with no retention, and the next apply fails with ResourceAlreadyExistsException against a
+# group this module was supposed to own.
+resource "aws_cloudwatch_log_group" "cluster" {
+  count = var.manage_log_group && length(var.enabled_cluster_log_types) > 0 ? 1 : 0
+
+  # Not a choice. EKS writes to this exact path and offers no way to change it, so a
+  # different name here would leave the real group unmanaged while creating an empty one.
+  name              = "/aws/eks/${local.name}/cluster"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.log_kms_key_arn
+
+  tags = merge(local.tags, { Name = "/aws/eks/${local.name}/cluster" })
 }
