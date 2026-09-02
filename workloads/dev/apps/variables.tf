@@ -56,3 +56,47 @@ variable "neo4j_client_namespaces" {
   type        = list(string)
   default     = []
 }
+
+# ── Firecrawl ─────────────────────────────────────────────────────────────────
+
+variable "firecrawl_image_tag" {
+  description = <<-EOT
+    Commit SHA of the Firecrawl images to deploy, or null to not deploy Firecrawl at all.
+
+    NULL BY DEFAULT, AND THAT IS PROPERTY 6 EXPRESSED AS A VARIABLE.
+
+    Images must exist before anything references them. The three Firecrawl images are built by
+    this repository's `build-images` workflow, which is dispatch-only — so until it has run,
+    there is nothing to deploy and a tag would name an image that cannot be pulled. The
+    failure mode of getting this wrong is ImagePullBackOff, which reads as a registry
+    permissions problem rather than an absent image.
+
+    So Firecrawl is opt-in: dispatch build-images, take the commit SHA it tagged, set it here.
+    The layer applies cleanly either way, which is what lets Neo4j land before Firecrawl does.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.firecrawl_image_tag == null || can(regex("^[0-9a-f]{40}$", var.firecrawl_image_tag))
+    error_message = "firecrawl_image_tag must be null or a 40-character lowercase commit SHA."
+  }
+}
+
+variable "firecrawl_namespace" {
+  description = "Namespace for the Firecrawl stack. Separate from `memory` so a tool backend and the graph do not share a failure domain."
+  type        = string
+  default     = "tools"
+}
+
+variable "firecrawl_client_namespaces" {
+  description = <<-EOT
+    Namespaces whose pods may reach the Firecrawl API.
+
+    Empty by default. Firecrawl's self-hosted API has no authentication, so this list is the
+    only thing standing in front of it — and nothing consumes it yet. Opening `eaf` now would
+    admit a workload that cannot currently start.
+  EOT
+  type        = list(string)
+  default     = []
+}

@@ -49,6 +49,7 @@ variable "repositories" {
     "eaf/agent",
     "tools/firecrawl",
     "tools/firecrawl-playwright",
+    "tools/firecrawl-nuq-postgres",
   ]
   validation {
     condition     = length(var.repositories) == length(toset(var.repositories))

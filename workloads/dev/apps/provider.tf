@@ -67,6 +67,25 @@ data "terraform_remote_state" "cluster_addons" {
   }
 }
 
+# ── Where the images are ──────────────────────────────────────────────────────
+#
+# Read from the registry layer rather than assembled from account id and region. The ECR
+# endpoint format is stable enough to hardcode, but reading it makes the dependency explicit:
+# a Firecrawl deploy against a registry whose repositories do not exist should fail naming the
+# missing output, not fail later on an image pull that reads as a permissions problem.
+#
+# It is also the layer that guarantees the repositories exist at all, which is Property 6's
+# ordering requirement expressed as a data dependency.
+data "terraform_remote_state" "registry" {
+  backend = "s3"
+
+  config = {
+    bucket = "eaf-bootstrap-tfstate-193027353132"
+    key    = "workloads/dev/registry/terraform.tfstate"
+    region = "eu-west-2"
+  }
+}
+
 locals {
   cluster_name     = data.terraform_remote_state.platform.outputs.cluster_name
   cluster_endpoint = data.terraform_remote_state.platform.outputs.cluster_endpoint
@@ -78,8 +97,23 @@ locals {
   # `enforced` is the only value that means anything is actually enforcing policy. The
   # cluster-addons layer computes it from whether the vpc-cni add-on has network policy
   # turned on, so this is a fact about the cluster rather than an assumption.
-  network_policy_state    = try(data.terraform_remote_state.cluster_addons.outputs.network_policy_state[var.memory_namespace], "unknown")
+  # Per namespace, not one value reused. The cluster-addons layer derives all of these from
+  # the same cluster-wide vpc-cni setting today, so they agree — but reading the memory
+  # namespace's state and applying it to a workload in `tools` would be correct by coincidence
+  # rather than by construction, and would quietly stop being correct if enforcement ever
+  # became per-namespace.
+  policy_state = data.terraform_remote_state.cluster_addons.outputs.network_policy_state
+
+  network_policy_state    = try(local.policy_state[var.memory_namespace], "unknown")
   network_policy_enforced = local.network_policy_state == "enforced"
+
+  firecrawl_policy_state    = try(local.policy_state[var.firecrawl_namespace], "unknown")
+  firecrawl_policy_enforced = local.firecrawl_policy_state == "enforced"
+
+  # The registry host, derived from any one repository URL. A repository URL is
+  # `<registry>/<name>`, so the host is everything before the first slash — taken from the
+  # data rather than rebuilt from parts that could disagree with it.
+  ecr_registry = split("/", values(data.terraform_remote_state.registry.outputs.repository_urls)[0])[0]
 
   # The credential-bearing exec args, written once. The kubernetes and helm providers must
   # authenticate identically; two copies of this list is two things to keep in step.
