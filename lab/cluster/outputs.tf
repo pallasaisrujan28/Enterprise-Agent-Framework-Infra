@@ -71,7 +71,7 @@ output "lab_inventory" {
       # Deliberate, and the reason kubectl works from a laptop with no bastion.
       endpoint_public        = true
       public_access_cidrs    = ["0.0.0.0/0"]
-      cluster_admin          = local.operator_role_arn_flat
+      cluster_admin          = local.operator_role_arn
       requires_role_arn_flag = false
     }
 

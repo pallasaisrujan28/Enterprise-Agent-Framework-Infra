@@ -56,16 +56,17 @@ data "aws_iam_roles" "operator" {
 }
 
 locals {
+  # THE FULL ARN, INCLUDING THE SSO PATH. An earlier version of this file stripped the path,
+  # on the belief that EKS rejects it. That belief was wrong and it was tested the expensive
+  # way: EKS answered
+  #
+  #   InvalidParameterException: The specified principalArn is invalid: invalid principal
+  #
+  # because the flattened ARN names a role that does not exist. The role genuinely lives at
+  # /aws-reserved/sso.amazonaws.com/<region>/, and that is the ARN to hand EKS. Verified by
+  # creating the entry with the CLI both ways: flattened rejected, full path accepted, and
+  # kubectl worked immediately afterwards.
   operator_role_arn = one(data.aws_iam_roles.operator.arns)
-
-  # EKS access entries want the role ARN WITHOUT the SSO path. An ARN containing
-  # `/aws-reserved/sso.amazonaws.com/...` is rejected, and the error talks about the principal
-  # not the path — so this substitution is not cosmetic.
-  operator_role_arn_flat = replace(
-    local.operator_role_arn,
-    "/^(arn:aws:iam::[0-9]+:role)/.*/(AWSReservedSSO_.*)$/",
-    "$1/$2"
-  )
 }
 
 check "operator_role_was_found" {
@@ -143,16 +144,58 @@ resource "aws_iam_role_policy_attachment" "node" {
   for_each = toset([
     "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
     "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
-    # The CNI policy on the NODE role rather than a Pod Identity association. Pod Identity is
-    # the better pattern and `workloads/` uses it; here it means one fewer moving part, and
-    # the node role is already a trusted principal.
+    # The CNI policy on the NODE role, which works because aws-node runs with
+    # hostNetwork: true — it IS the node, so it reaches instance metadata directly.
     "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
-    # So the EBS CSI driver can create volumes without its own role.
-    "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy",
   ])
 
   role       = aws_iam_role.node.name
   policy_arn = each.value
+}
+
+# ── Pod Identity for the EBS CSI controller ───────────────────────────────────
+#
+# NOT OPTIONAL, AND I LEARNED THAT THE EXPENSIVE WAY. The first version of this file attached
+# AmazonEBSCSIDriverPolicy to the node role and skipped Pod Identity "to save a moving part".
+# The controller then sat in CrashLoopBackOff for twenty minutes, 1/6 containers ready, while
+# the add-on hung in CREATING — the same shape as the 20-minute ebs-csi timeout that triggered
+# this project's original teardown.
+#
+# The reason, from the controller's own logs:
+#
+#   Failed health check (verify network connection and IAM credentials): dry-run EC2 API call
+#   failed: DescribeAvailabilityZones, get identity: get credentials: failed to refresh cached
+#   credentials, no EC2 IMDS role found, ec2imds: GetMetadata, context deadline exceeded
+#
+# The controller is an ordinary pod, so instance metadata is one network hop away — and the
+# managed node group sets HttpPutResponseHopLimit = 1, which blocks exactly that hop.
+# Confirmed on the running instances rather than assumed. So there is no falling back to the
+# node role: the credential chain has nowhere to go.
+#
+# aws-node gets away with it because it runs hostNetwork: true. That asymmetry is the whole
+# explanation for why the CNI came up and the CSI driver did not.
+data "aws_iam_policy_document" "pod_identity_assume" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ebs_csi" {
+  name               = "${var.org_prefix}-${var.environment}-ebs-csi"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  role = aws_iam_role.ebs_csi.name
+
+  # V2, and the path matters. AmazonEBSCSIDriverPolicy lives under `service-role/`;
+  # AmazonEBSCSIDriverPolicyV2 does not. Getting it wrong yields NoSuchEntity, which reads as
+  # a typo in the policy name rather than a wrong path.
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEBSCSIDriverPolicyV2"
 }
 
 # ── Cluster ───────────────────────────────────────────────────────────────────
@@ -183,7 +226,7 @@ module "eks_cluster" {
   # that reads as a missing access entry.
   access_entries = {
     operator = {
-      principal_arn = local.operator_role_arn_flat
+      principal_arn = local.operator_role_arn
       policies = [{
         policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
         access_scope = {
@@ -320,6 +363,13 @@ module "addon_ebs_csi" {
   addon_name    = "aws-ebs-csi-driver"
   addon_version = var.addon_versions.ebs_csi
 
-  # No Pod Identity association: AmazonEBSCSIDriverPolicy is on the node role instead.
+  # The service account name is not a guess — `aws eks describe-addon-configuration` reports
+  # it, and the module's own documentation records the pairing:
+  #   aws-ebs-csi-driver -> ebs-csi-controller-sa / AmazonEBSCSIDriverPolicyV2
+  pod_identity = {
+    role_arn        = aws_iam_role.ebs_csi.arn
+    service_account = "ebs-csi-controller-sa"
+  }
+
   depends_on = [module.nodes]
 }
