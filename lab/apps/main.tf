@@ -17,6 +17,12 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    # Here for one reason: a pod that calls Bedrock needs an IAM role, and a Pod Identity
+    # association is an EKS API call rather than a Kubernetes object.
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
   }
 }
 
@@ -35,6 +41,10 @@ locals {
 # `exec` rather than a token read at plan time: an apply that takes a few minutes outlives a
 # token fetched at the start of it. No --role-arn — the operator's own SSO role is the cluster
 # admin, which is the whole reason kubectl works here without a hop.
+provider "aws" {
+  region = local.region
+}
+
 provider "kubernetes" {
   host                   = data.terraform_remote_state.cluster.outputs.cluster_endpoint
   cluster_ca_certificate = base64decode(data.terraform_remote_state.cluster.outputs.cluster_certificate_authority_data)
@@ -50,6 +60,68 @@ resource "kubernetes_namespace_v1" "agent" {
   metadata {
     name = var.namespace
   }
+}
+
+# ── Bedrock access, via Pod Identity ──────────────────────────────────────────
+#
+# POD IDENTITY, NOT THE NODE ROLE. This is the same trap the EBS CSI driver fell into: the
+# node group sets HttpPutResponseHopLimit = 1, so IMDS answers the node but not a pod one hop
+# further on. A pod relying on the node's instance profile gets
+#
+#   no EC2 IMDS role found, ec2imds: GetMetadata, context deadline exceeded
+#
+# and the failure takes twenty minutes of CrashLoopBackOff to read. `aws-node` escapes it only
+# because it runs with hostNetwork: true. Pod Identity injects credentials over a local
+# endpoint instead of IMDS, so the hop limit is irrelevant.
+data "aws_iam_policy_document" "pod_identity_assume" {
+  statement {
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+    principals {
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
+    }
+  }
+}
+
+# foundation-model ARNs only, deliberately. The organisation's SCP explicitly denies
+# inference-profile ARNs, so granting them here would produce a role whose permissions read as
+# working and whose calls fail — the least useful combination. What this role can do is what
+# the account can actually do.
+data "aws_iam_policy_document" "bedrock_invoke" {
+  statement {
+    actions = [
+      "bedrock:InvokeModel",
+      "bedrock:InvokeModelWithResponseStream",
+    ]
+    resources = ["arn:aws:bedrock:*::foundation-model/*"]
+  }
+}
+
+resource "aws_iam_role" "bedrock" {
+  name               = "eaf-lab-bedrock"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_assume.json
+}
+
+resource "aws_iam_role_policy" "bedrock" {
+  name   = "bedrock-invoke"
+  role   = aws_iam_role.bedrock.id
+  policy = data.aws_iam_policy_document.bedrock_invoke.json
+}
+
+# Only the pods that call AWS get this. The datastores keep the default ServiceAccount and no
+# association, so nothing hands Bedrock to Postgres.
+resource "kubernetes_service_account_v1" "bedrock" {
+  metadata {
+    name      = "agent-bedrock"
+    namespace = kubernetes_namespace_v1.agent.metadata[0].name
+  }
+}
+
+resource "aws_eks_pod_identity_association" "bedrock" {
+  cluster_name    = local.cluster_name
+  namespace       = kubernetes_namespace_v1.agent.metadata[0].name
+  service_account = kubernetes_service_account_v1.bedrock.metadata[0].name
+  role_arn        = aws_iam_role.bedrock.arn
 }
 
 # ── The gp3 StorageClass ──────────────────────────────────────────────────────
@@ -96,6 +168,13 @@ resource "random_password" "neo4j" {
   special = false
 }
 
+# LiteLLM's master key, which is also the API key every client presents to it. One value for
+# both halves because the proxy is reachable only inside the namespace.
+resource "random_password" "litellm" {
+  length  = 32
+  special = false
+}
+
 resource "kubernetes_secret_v1" "creds" {
   metadata {
     name      = "agent-credentials"
@@ -119,6 +198,32 @@ resource "kubernetes_secret_v1" "creds" {
     # is the one exception it special-cases. So a shared secret can carry exactly one
     # NEO4J_-prefixed key. Consumers that want the bare password split NEO4J_AUTH on the slash.
     NEO4J_AUTH = "neo4j/${random_password.neo4j.result}"
+
+    # The proxy reads this as its master key; clients send it as their bearer token.
+    LITELLM_MASTER_KEY = random_password.litellm.result
+
+    # Graphiti and anything else built on an OpenAI client read these two names by convention,
+    # so pointing them at the proxy means no client needs to be told about Bedrock at all.
+    # Safe to add to the shared secret: neither borrows a prefix any of these images parses as
+    # its own configuration, which is the mistake NEO4J_PASSWORD made.
+    OPENAI_API_KEY  = random_password.litellm.result
+    OPENAI_BASE_URL = "http://litellm:4000/v1"
+  }
+}
+
+# ── Config files ──────────────────────────────────────────────────────────────
+#
+# One ConfigMap per service that declares a config file. Only LiteLLM does today.
+resource "kubernetes_config_map_v1" "config" {
+  for_each = { for k, v in var.services : k => v if v.config != null }
+
+  metadata {
+    name      = "${each.key}-config"
+    namespace = kubernetes_namespace_v1.agent.metadata[0].name
+  }
+
+  data = {
+    (each.value.config.filename) = each.value.config.content
   }
 }
 
@@ -181,9 +286,20 @@ resource "kubernetes_deployment_v1" "service" {
     template {
       metadata {
         labels = { app = each.key }
+
+        # A ConfigMap change does not restart the pods that mount it — the same way a Secret
+        # change does not, which cost a `kubectl rollout restart` to work out last time. Putting
+        # the content hash in the pod template makes the template itself change, so editing the
+        # LiteLLM config rolls the proxy instead of quietly leaving it on the old one.
+        annotations = each.value.config == null ? {} : {
+          "eaf.local/config-hash" = sha1(each.value.config.content)
+        }
       }
 
       spec {
+        # Null for the datastores, which then get the namespace default and no AWS credentials.
+        service_account_name = each.value.service_account
+
         # KUBERNETES INJECTS LEGACY SERVICE-DISCOVERY ENV VARS UNLESS TOLD NOT TO, and for
         # Neo4j that is fatal rather than untidy.
         #
@@ -264,6 +380,15 @@ resource "kubernetes_deployment_v1" "service" {
           }
 
           dynamic "volume_mount" {
+            for_each = each.value.config == null ? [] : [1]
+            content {
+              name       = "config"
+              mount_path = each.value.config.mount_path
+              read_only  = true
+            }
+          }
+
+          dynamic "volume_mount" {
             for_each = each.value.storage == null ? [] : [1]
             content {
               name       = "data"
@@ -274,6 +399,16 @@ resource "kubernetes_deployment_v1" "service" {
             }
           }
 
+        }
+
+        dynamic "volume" {
+          for_each = each.value.config == null ? [] : [1]
+          content {
+            name = "config"
+            config_map {
+              name = kubernetes_config_map_v1.config[each.key].metadata[0].name
+            }
+          }
         }
 
         dynamic "volume" {
@@ -292,6 +427,28 @@ resource "kubernetes_deployment_v1" "service" {
   timeouts {
     create = "10m"
   }
+
+  # POD IDENTITY IS INJECTED AT POD CREATION, SO THE ASSOCIATION HAS TO EXIST FIRST.
+  #
+  # A mutating webhook adds AWS_CONTAINER_CREDENTIALS_FULL_URI to a pod only if an association
+  # already covers its ServiceAccount. Create the pod first and it comes up with no AWS
+  # credentials at all, and stays that way — the webhook never revisits a running pod.
+  #
+  # Terraform could not infer this ordering. `service_account` is a plain string in var.services
+  # rather than a reference to the ServiceAccount resource, so there was no edge in the graph
+  # between the deployment and the association, and the first apply created LiteLLM first. It
+  # started cleanly and every Bedrock call failed with
+  #
+  #   litellm.AuthenticationError: BedrockException Invalid Authentication - Unable to locate
+  #   credentials
+  #
+  # which reads like a LiteLLM misconfiguration and is nothing of the kind. The pods needed a
+  # rollout restart to pick the credentials up.
+  #
+  # This makes every service wait on the association, including the datastores that do not want
+  # it. That costs one API call's worth of ordering and means a rebuild from empty state works
+  # the first time, which the previous version did not.
+  depends_on = [aws_eks_pod_identity_association.bedrock]
 }
 
 resource "kubernetes_service_v1" "service" {
