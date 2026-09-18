@@ -109,7 +109,7 @@ def main() -> None:
         # A fresh session id, so nothing is inherited from a checkpointed transcript. Anything
         # recalled came from the Store.
         fresh = Session(user_id="alice", session_id="verify-fresh")
-        agent = build_agent(store, saver, fresh)
+        agent = build_agent(store, saver, fresh, gate_web_search=False)
         result = agent.invoke(
             {
                 "messages": [

@@ -213,6 +213,63 @@ variable "services" {
       }
     }
 
+    # ── Search the agent owns ──────────────────────────────────────────────────
+    #
+    # A metasearch engine, self-hosted. It queries other engines and merges the results, so there
+    # is no API key, no per-query bill and no quota — and no third party sees the agent's queries.
+    #
+    # THREE THINGS BLOCK API ACCESS OUT OF THE BOX, and all three are configured below:
+    #
+    #   1. JSON is not an allowed output format. The default is HTML only, so a caller asking for
+    #      format=json gets a 403 that reads like a permissions problem.
+    #   2. The limiter is bot protection. It exists to stop scrapers, and a Python client is
+    #      indistinguishable from one. Off, because this instance is reachable only inside the
+    #      namespace.
+    #   3. Searches default to POST. A GET with a query string is refused until method is
+    #      changed, which makes the simplest possible client fail first.
+    #
+    # `use_default_settings: true` means this file overrides rather than replaces — the several
+    # dozen default engine definitions are inherited instead of being re-declared here.
+    searxng = {
+      image      = "searxng/searxng:2026.9.18-0d6910ae5"
+      ports      = [8080]
+      cpu        = "250m"
+      memory     = "512Mi"
+      ready_port = 8080
+
+      env = {
+        # Pointed at the mounted file explicitly. The image looks in /etc/searxng by default and
+        # would find it anyway, but naming it means a future change to the mount path fails
+        # loudly here rather than silently falling back to the built-in defaults.
+        SEARXNG_SETTINGS_PATH = "/etc/searxng/settings.yml"
+      }
+
+      config = {
+        mount_path = "/etc/searxng"
+        filename   = "settings.yml"
+        # $${...} escapes the interpolation so the literal reaches the ConfigMap, where
+        # templatestring renders it against a generated secret. Writing $ {...} unescaped would
+        # make Terraform try to resolve it while parsing this file and fail.
+        content = <<-EOT
+          use_default_settings: true
+
+          server:
+            secret_key: "$${searxng_secret}"
+            limiter: false
+            image_proxy: false
+            method: "GET"
+
+          search:
+            formats:
+              - html
+              - json
+            safe_search: 0
+            autocomplete: ""
+            default_lang: "en"
+        EOT
+      }
+    }
+
     # ── Where the experiment actually runs ─────────────────────────────────────
     #
     # No ports, no volume: a pod to `kubectl exec` into. It holds the clients rather than
@@ -253,13 +310,14 @@ variable "services" {
       #
       # Quoted because the brackets are shell glob characters.
       args = ["sh", "-lc",
-        "pip install --quiet --root-user-action=ignore graphiti-core langchain-aws deepagents langgraph-checkpoint-postgres 'psycopg[binary]' neo4j qdrant-client redis || echo DEPENDENCY_INSTALL_FAILED; sleep infinity"
+        "pip install --quiet --root-user-action=ignore graphiti-core langchain-aws deepagents langgraph-checkpoint-postgres 'psycopg[binary]' neo4j qdrant-client redis trafilatura || echo DEPENDENCY_INSTALL_FAILED; sleep infinity"
       ]
 
       env = {
         NEO4J_URI        = "bolt://neo4j:7687"
         QDRANT_URL       = "http://qdrant:6333"
         REDIS_URL        = "redis://redis:6379"
+        SEARXNG_URL      = "http://searxng:8080"
         PYTHONUNBUFFERED = "1"
       }
     }

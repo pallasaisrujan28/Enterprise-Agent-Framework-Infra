@@ -49,7 +49,8 @@ def main() -> None:
         store.setup()
         saver.setup()
 
-        agent = build_agent(store, saver, session)
+        # Gate off: nothing here is about approval, and an unattended run would block on it.
+        agent = build_agent(store, saver, session, gate_web_search=False)
 
         result = agent.invoke(
             {"messages": [{"role": "user", "content": TASK}]},

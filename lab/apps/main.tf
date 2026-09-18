@@ -175,6 +175,14 @@ resource "random_password" "litellm" {
   special = false
 }
 
+# SearXNG signs sessions with this. Generated rather than written into the repo — the config
+# that consumes it is a checked-in string, and a checked-in secret is a habit worth not forming
+# even in a lab.
+resource "random_password" "searxng" {
+  length  = 32
+  special = false
+}
+
 resource "kubernetes_secret_v1" "creds" {
   metadata {
     name      = "agent-credentials"
@@ -222,8 +230,13 @@ resource "kubernetes_config_map_v1" "config" {
     namespace = kubernetes_namespace_v1.agent.metadata[0].name
   }
 
+  # Rendered, not copied. A config file that needs a generated secret cannot hold it as a literal
+  # in var.services, because that default is a checked-in string. The placeholders a service may
+  # use are fixed here; a service that uses none is rendered unchanged.
   data = {
-    (each.value.config.filename) = each.value.config.content
+    (each.value.config.filename) = templatestring(each.value.config.content, {
+      searxng_secret = random_password.searxng.result
+    })
   }
 }
 

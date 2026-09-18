@@ -52,6 +52,7 @@ from langgraph.runtime import Runtime
 
 from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import CompositeBackend, LocalShellBackend, StoreBackend
+from web import WEB_TOOLS
 
 # Root for per-session scratch directories. An EBS volume, so a session's working files can be
 # inspected after the run — but never the place durable knowledge goes.
@@ -159,8 +160,19 @@ def build_backend(store: Any, session: Session) -> CompositeBackend:
     )
 
 
-def build_agent(store: Any, checkpointer: Any, session: Session | None = None) -> Any:
-    """Assemble the harness for one session."""
+def build_agent(
+    store: Any,
+    checkpointer: Any,
+    session: Session | None = None,
+    *,
+    gate_web_search: bool = True,
+) -> Any:
+    """Assemble the harness for one session.
+
+    `gate_web_search` is the STEERING box. On, the graph suspends before every web_search call
+    and waits for a decision — which is correct for a supervised run and a hang for an unattended
+    one, so the tests that are not about approval turn it off.
+    """
     session = session or Session()
 
     researcher = SubAgent(
@@ -177,11 +189,12 @@ def build_agent(store: Any, checkpointer: Any, session: Session | None = None) -
 
     return create_deep_agent(
         model=MODEL,
-        tools=[lab_inventory],
+        tools=[lab_inventory, *WEB_TOOLS],
         system_prompt=(
             "You are the EAF lab agent. You have a per-session filesystem, a shell, shared "
             "skills, and memory that persists across sessions. Prefer your tools over guessing. "
-            "When you learn something durable, write it to /memory/AGENTS.md."
+            "To research something you do not know, use web_search to find pages and web_fetch "
+            "to read them. When you learn something durable, write it to /memory/AGENTS.md."
         ),
         # DELEGATION. Planning is NOT in the base stack — TodoListMiddleware lives in
         # langchain.agents.middleware and deepagents only pulls it in through harness profiles
@@ -196,12 +209,24 @@ def build_agent(store: Any, checkpointer: Any, session: Session | None = None) -
         store=store,
         checkpointer=checkpointer,
         context_schema=AgentContext,
-        # STEERING — WEB SEARCH IS WHERE THIS TURNS ON.
+        # STEERING. The gate goes on web_search and not on web_fetch, because search is where the
+        # agent decides for itself to reach outside the cluster. web_fetch acts on a URL that is
+        # already in the conversation, so gating it would ask for the same approval twice.
         #
-        # `interrupt_on={"web_search": True}` suspends the graph before the call and waits for a
-        # human to approve it. Deliberately absent until the tool exists, because interrupt_on
-        # keys are tool names and a graph that interrupts with nothing listening is
-        # indistinguishable from a hang.
+        # Three decisions are allowed rather than a yes/no: approve runs the call as proposed,
+        # edit rewrites the query first — which is the useful one, since a bad query is more
+        # common than a forbidden one — and reject returns a refusal to the model so it can
+        # continue without the result instead of failing.
+        interrupt_on=(
+            {
+                "web_search": {
+                    "allowed_decisions": ["approve", "edit", "reject"],
+                    "description": "The agent wants to search the web",
+                }
+            }
+            if gate_web_search
+            else None
+        ),
     )
 
 
