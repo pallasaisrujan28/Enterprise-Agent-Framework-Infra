@@ -62,10 +62,13 @@ SESSIONS_ROOT = os.environ.get("AGENT_SESSIONS_ROOT", "/workspace/sessions")
 # has explicit Nova handling, so nothing proxies this path. LiteLLM is only for Graphiti, which
 # has no Bedrock provider of its own.
 #
-# Nova Pro because it is the most capable model this account can invoke. Claude is walled off by
-# the AWS Marketplace payment-instrument requirement, and Claude 4.x/5 need inference profiles,
-# which the organisation's SCP denies.
-MODEL = os.environ.get("AGENT_MODEL", "bedrock_converse:amazon.nova-pro-v1:0")
+# gpt-oss-120b because it is open-weight, so the AWS Marketplace subscription that walls off
+# Anthropic and the hosted GPT models does not apply — and because it reasons before answering.
+# Nova Pro drove the harness fine but its JSON was loose enough to break Graphiti's temporal
+# invalidation, and tool calling is structured output by another name.
+#
+# Override with AGENT_MODEL to compare. bedrock_converse:amazon.nova-pro-v1:0 is the baseline.
+MODEL = os.environ.get("AGENT_MODEL", "bedrock_converse:openai.gpt-oss-120b-1:0")
 
 # Store namespace components are validated against [A-Za-z0-9\-_.@+:~], and anything else is
 # rejected to stop glob injection into store lookups. So identifiers are sanitised rather than

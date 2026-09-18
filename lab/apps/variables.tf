@@ -114,47 +114,45 @@ variable "services" {
     # Anthropic (the direct API, not Bedrock), Groq and Ollama. So Bedrock is reached through
     # an OpenAI-compatible proxy rather than natively, and this is that proxy.
     #
-    # NOVA, NOT CLAUDE, AND NOT BY PREFERENCE. Every id below was checked by invoking it in
-    # eu-west-2. Three separate ceilings rule out everything else:
+    # GPT-OSS, BECAUSE IT IS OPEN-WEIGHT. Every id below was checked by invoking it in
+    # eu-west-2:
     #
+    #   openai.gpt-oss-120b-1:0                  works, returns reasoning + answer
+    #   openai.gpt-oss-20b-1:0                   works
     #   amazon.nova-pro-v1:0                     works
     #   amazon.nova-lite-v1:0                    works
-    #   amazon.nova-micro-v1:0                   works
     #   amazon.titan-embed-text-v2:0             works, 1024 dimensions
     #
-    #   anthropic.claude-3-7-sonnet              AccessDenied: requires aws-marketplace:
-    #   anthropic.claude-3-sonnet                Subscribe/ViewSubscriptions, and
-    #                                            INVALID_PAYMENT_INSTRUMENT — "a valid payment
-    #                                            instrument must be provided"
+    #   openai.gpt-6-astra, gpt-5.6-terra        AccessDenied
+    #   anthropic.claude-3-7-sonnet              AccessDenied: needs aws-marketplace:Subscribe
+    #   anthropic.claude-3-sonnet                and INVALID_PAYMENT_INSTRUMENT
+    #   claude-sonnet-4-5, opus-4-5, haiku-4-5,  on-demand not supported; profile-only
+    #   amazon.nova-2-lite
+    #   eu.* / global.* inference profiles       AccessDenied, SCP p-j1oakqhe
+    #   anything in us-west-2                    AccessDenied, same SCP
     #
-    #   claude-sonnet-4-5, opus-4-5, haiku-4-5,  on-demand not supported at all; reachable only
-    #   amazon.nova-2-lite                       through an inference profile
+    # THE SCP IS A REGION GUARDRAIL. An earlier version of this comment called it an
+    # inference-profile rule, which was wrong. bedrock:ListFoundationModels is denied outright in
+    # us-west-2, and eu.*/global.* profiles are denied because they can route outside eu-west-2.
+    # Same policy, and the accurate reading changes what is worth trying.
     #
-    #   eu.* / global.* inference profiles       AccessDenied, explicit deny in service control
-    #                                            policy p-j1oakqhe
+    # MARKETPLACE IS THE OTHER CEILING. Anthropic and the hosted OpenAI GPT models are AWS
+    # Marketplace products: they need a subscription, a subscription needs a payment instrument,
+    # and credits are not one. No IAM change helps — the SSO administrator hits the same wall.
     #
-    # 1. ANTHROPIC MODELS ON BEDROCK ARE AWS MARKETPLACE PRODUCTS. They need a Marketplace
-    #    subscription, and a subscription needs a payment instrument. Credits are not one. No
-    #    IAM change fixes this — the SSO administrator hits the same wall, so granting the pod
-    #    aws-marketplace:Subscribe would only move the failure, not remove it.
+    # gpt-oss is open-weight, so no subscription is involved and the Marketplace wall does not
+    # apply. It also reasons before answering, which is why it is here: Nova's loose JSON was
+    # what broke Graphiti's self-correction, emitting the string "null" where a date belonged and
+    # then invalidating the wrong edge. Graphiti's entire contract is structured output.
     #
-    #    AND A SUCCESSFUL CALL WAS NOT PROOF OF ACCESS. The first two calls to Claude 3.7
-    #    Sonnet returned real completions, and the same call minutes later returned
-    #    AccessDenied — the subscription was pending, then failed. An earlier version of this
-    #    comment recorded Claude as verified working on the strength of those calls. It was
-    #    wrong.
-    #
-    # 2. Newer models are on-demand-ineligible, so they need an inference profile.
-    # 3. Inference profiles are denied by the organisation's SCP, which lives in the management
-    #    account (193027353132) and is out of reach from here.
-    #
-    # The intersection of "no Marketplace subscription needed", "on-demand eligible" and "not a
-    # profile" is Amazon's own first-party models. Nova Pro is the most capable of them.
+    # AND A SUCCESSFUL CALL IS NOT PROOF OF DURABLE ACCESS. Two calls to Claude 3.7 Sonnet
+    # returned real completions and the same call minutes later returned AccessDenied — the
+    # subscription was pending, then failed.
     #
     # The OpenAI names are aliases. Graphiti picks its own defaults (gpt-4.1-mini for the main
-    # model, a smaller one for cheap calls) unless told otherwise, so the aliases are named to
-    # match those defaults and mapped to Nova by capability: Pro where quality matters, Lite
-    # where Graphiti is doing bulk work.
+    # model, a smaller one for bulk calls) unless told otherwise, so the aliases match those
+    # defaults. Both point at 120b: the small model is what handles deduplication and
+    # contradiction detection, so it is the last place to economise.
     litellm = {
       image           = "ghcr.io/berriai/litellm:v1.101.0"
       ports           = [4000]
@@ -171,23 +169,29 @@ variable "services" {
           model_list:
             - model_name: gpt-4.1-mini
               litellm_params:
-                model: bedrock/amazon.nova-pro-v1:0
+                model: bedrock/openai.gpt-oss-120b-1:0
                 aws_region_name: eu-west-2
             - model_name: gpt-4.1-nano
               litellm_params:
-                model: bedrock/amazon.nova-lite-v1:0
+                model: bedrock/openai.gpt-oss-120b-1:0
                 aws_region_name: eu-west-2
             - model_name: gpt-4o-mini
               litellm_params:
-                model: bedrock/amazon.nova-lite-v1:0
+                model: bedrock/openai.gpt-oss-120b-1:0
                 aws_region_name: eu-west-2
+            - model_name: gpt-oss-120b
+              litellm_params:
+                model: bedrock/openai.gpt-oss-120b-1:0
+                aws_region_name: eu-west-2
+            - model_name: gpt-oss-20b
+              litellm_params:
+                model: bedrock/openai.gpt-oss-20b-1:0
+                aws_region_name: eu-west-2
+            # Kept reachable for comparison. The Nova run is the baseline the gpt-oss run is
+            # being measured against, so removing it would remove the control.
             - model_name: nova-pro
               litellm_params:
                 model: bedrock/amazon.nova-pro-v1:0
-                aws_region_name: eu-west-2
-            - model_name: nova-lite
-              litellm_params:
-                model: bedrock/amazon.nova-lite-v1:0
                 aws_region_name: eu-west-2
             # Titan returns 1024 dimensions, not the 1536 an OpenAI client assumes from the
             # name. Graphiti has to be told embedding_dim=1024 or it builds an index of the
