@@ -58,3 +58,7 @@ crash.*.log
 # meaningless and misleading. `terraform init` and `terraform test` create them
 # there as a side effect of running module tests — ignore those.
 modules/**/.terraform.lock.hcl
+lab/*/terraform.tfstate
+lab/*/terraform.tfstate.backup
+lab/*/.terraform/
+lab/*/.terraform.lock.hcl
